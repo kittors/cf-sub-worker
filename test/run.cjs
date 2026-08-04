@@ -496,7 +496,34 @@ sec('16. 机场元信息解析（多家格式兼容）')
 }
 
 
-sec('17. 源码不含站点信息（开源前置检查）')
+sec('17. 管理端 JS 可执行性')
+{
+  // worker.js 本身语法正确，不代表它拼出来的 HTML 里的 JS 也正确。
+  // 模板字符串里写 '\n' 会被解析成真实换行，生成断行的字符串字面量，
+  // 整个 script 直接崩溃 —— 表现就是管理端白屏。这一关必须单独把。
+  const { execFileSync } = require('child_process')
+  const os = require('os'), path = require('path')
+  for (const [authed, inited, label] of [[true, true, '已登录'], [false, false, '首次初始化'], [false, true, '登录页']]) {
+    const html = T.adminHTML(authed, inited)
+    const m = html.match(/<script>([\s\S]*?)<\/script>/)
+    ok(!!m, `${label}：能提取到 script`)
+    if (!m) continue
+    const f = path.join(os.tmpdir(), `admin_${authed}_${inited}.js`)
+    fs.writeFileSync(f, m[1])
+    let err = ''
+    try { execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' }) }
+    catch (e) { err = String(e.stderr || e.message).split('\n').slice(0, 3).join(' ') }
+    ok(!err, `${label}：JS 语法正确` + (err ? ` → ${err}` : ''))
+    fs.unlinkSync(f)
+  }
+  // 模板里的换行转义必须是 \\n，写成 \n 会被提前解析掉
+  const src = fs.readFileSync(path.join(__dirname, '..', 'worker.js'), 'utf8')
+  const uiStart = src.indexOf('function adminHTML')
+  const bad = src.slice(uiStart).split('\n').filter(l => /\.(split|join)\('\\n'\)/.test(l) && !/\\\\n/.test(l))
+  ok(bad.length === 0, '模板内换行转义正确' + (bad.length ? `：${bad[0].trim().slice(0, 60)}` : ''))
+}
+
+sec('18. 源码不含站点信息（开源前置检查）')
 {
   const src = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
   const dep = fs.readFileSync(require('path').join(__dirname,'..','deploy.sh'), 'utf8')

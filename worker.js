@@ -2324,7 +2324,7 @@ window.editSettings = async () => {
       <div class="hint">自建节点所在服务器的 IP 建议填这里：程序按 IP 直连时匹配不到域名规则，会被兜底送进代理绕一圈。</div></div>\`
   const box = await modal({ title:'站点设置', html, ok:'保存', wide:true })
   if (!box) return
-  const lines = el => box.querySelector(el).value.split('\n').map(x => x.trim()).filter(Boolean)
+  const lines = el => box.querySelector(el).value.split('\\n').map(x => x.trim()).filter(Boolean)
   const r = await api('/api/settings', {
     domain: box.querySelector('#stdm').value.trim(),
     directDomains: lines('#stdd'), directIPs: lines('#stip')
