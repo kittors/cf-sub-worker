@@ -614,8 +614,16 @@ sec('19. 分流目标多选')
   ok(ui.includes('return          // 多选时保持展开'), '多选时面板不自动收起')
   ok(ui.includes("if (!pop.querySelector('.selo.on')) o.classList.add('on')"), '至少保留一个选中项')
   ok(ui.includes('class="tgts"'), '策略行支持展示多个目标')
-  ok(!/\.pol\.drag \*\{visibility:hidden\}/.test(ui), '拖拽行不再抹掉内容')
-  ok(/\.pol\.drag\{[^}]*opacity/.test(ui), '拖拽行改为淡化处理')
+  // 浏览器会另外渲染跟随鼠标的元素快照，原行若留着淡内容就成重影。
+  // 正确做法是原行退成虚线落点槽：内容 opacity:0（保留行高），边框虚线。
+  ok(!/\.pol\.drag \*\{visibility:hidden\}/.test(ui), '不用 visibility:hidden（会连同布局一起塌）')
+  ok(/\.pol\.drag\{[^}]*dashed/.test(ui), '拖拽行呈虚线落点槽')
+  ok(/\.pol\.drag > \*\{opacity:0\}/.test(ui), '槽内内容隐藏但保留行高')
+  ok(!/\.pol\.drag\{[^}]*opacity:\s*\.\d/.test(ui), '整行不再半透明，避免与拖拽预览重叠')
+  // 多选必须一眼可辨，否则只选一项时外观与单选毫无区别
+  ok(/\.sel\.multi \.selo::before\{/.test(ui), '多选项有常驻复选框')
+  ok(ui.includes('可多选'), '标签写明可多选')
+  ok(ui.includes("'（已选 1 项）'") || ui.includes('（已选 1 项）'), '单选中项也标出已选数量')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

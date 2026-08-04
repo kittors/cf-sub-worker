@@ -1400,8 +1400,21 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .selo{padding:8px 10px;border-radius:7px;font-size:13.5px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .12s}
 .selo:hover{background:var(--hov)}
 .selo.on{color:var(--acc);font-weight:500}
+/* 多选：左侧常驻复选框。只在选中时显示对勾的话，外观和单选毫无区别，
+   用户根本看不出能多选。 */
+.sel.multi .selo{position:relative;padding-left:11px}
+.sel.multi .selo .ic{display:none}
+.sel.multi .selo::before{content:'';flex-shrink:0;width:15px;height:15px;border-radius:4.5px;
+  border:1.5px solid var(--bd);background:var(--card);transition:background .14s var(--e),border-color .14s var(--e)}
+.sel.multi .selo::after{content:'';position:absolute;left:16px;top:50%;width:4px;height:8px;
+  border:2px solid #fff;border-top:0;border-left:0;transform:translateY(-62%) rotate(45deg);
+  opacity:0;transition:opacity .14s var(--e)}
+.sel.multi .selo:hover::before{border-color:var(--tx3)}
+.sel.multi .selo.on::before{background:var(--acc);border-color:var(--acc)}
+.sel.multi .selo.on::after{opacity:1}
 .sel.multi .selo.on{background:var(--accBg)}
 .sel.multi .selp{padding-bottom:5px}
+.lb .opt{font-weight:400;color:var(--tx3);margin-left:5px}
 .selo .ic{opacity:0}
 .selo.on .ic{opacity:1}
 
@@ -1415,10 +1428,11 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 /* 策略行 */
 .pol{display:flex;gap:11px;align-items:center;padding:11px 12px;border:1px solid var(--bd2);border-radius:11px;margin-bottom:7px;background:var(--card);transition:border-color .16s var(--e),background .16s var(--e),opacity .16s,box-shadow .16s var(--e)}
 .pol:hover{border-color:var(--bd);background:var(--hov)}
-/* 拖拽中：内容保持可见，只淡化微缩。早先用 visibility:hidden 抹掉内容，
-   行高还占着，看起来像列表中间破了个洞。 */
-.pol.drag{opacity:.38;transform:scale(.985);background:var(--hov);border-color:var(--accBd)}
-.pol.drag .grip{color:var(--acc)}
+/* 拖拽中：原行退成虚线空槽，作为落点指示。
+   浏览器会另外渲染一张跟随鼠标的元素快照，原行若还留着淡淡的内容，
+   两者叠在一起就是重影。用 opacity:0 抹掉内容但保留行高。 */
+.pol.drag{background:var(--accBg);border:1.5px dashed var(--accBd);box-shadow:none}
+.pol.drag > *{opacity:0}
 .pol{cursor:default}
 .pol[draggable="true"]{cursor:grabbing}
 .pol.off{opacity:.5}
@@ -1648,8 +1662,9 @@ function selectHTML(id, opts, val, multi){
 function selLabel(opts, picked, multi){
   const names = picked.map(v => (opts.find(o => o.v === v) || {}).label).filter(Boolean)
   if (!names.length) return multi ? '未选择' : (opts[0] || {}).label || ''
-  if (!multi || names.length === 1) return names[0]
-  return names.length <= 2 ? names.join('、') : \`\${names[0]} 等 \${names.length} 项\`
+  if (!multi) return names[0]
+  if (names.length === 1) return names[0] + '（已选 1 项）'
+  return names.length === 2 ? names.join('、') : \`\${names[0]} 等 \${names.length} 项\`
 }
 // 读取当前值：单选得字符串，多选得数组
 function selValue(sel){
@@ -2317,9 +2332,9 @@ window.editPol = async (i) => {
   const html = \`
     <div class="fg"><label class="lb">策略名称</label>
       <input id="pn" value="\${esc(p.name)}" placeholder="如 🎬 流媒体"></div>
-    <div class="fg"><label class="lb">分流目标</label>
+    <div class="fg"><label class="lb">分流目标<span class="opt">可多选</span></label>
       \${selectHTML('pt', POL.targets, Array.isArray(p.target) ? p.target : [p.target || 'all'], true)}
-      <div class="hint">可多选。选中的会按顺序放进该策略的节点组，客户端里可自行切换；第一个为默认。</div></div>
+      <div class="hint">选中的会按顺序放进该策略的节点组，客户端里可自行切换，第一个为默认。</div></div>
     <div class="fg"><label class="lb">严格模式</label>
       <div class="row"><button class="sw" id="ps" data-on="\${p.strict?1:0}"><i></i></button>
         <span class="hint" style="margin:0">开启后组内只有目标本身，目标不可用即断流，不会静默回落到其它地区。</span></div></div>
