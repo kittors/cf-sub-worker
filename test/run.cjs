@@ -6,7 +6,7 @@ global.btoa = s => Buffer.from(s, 'binary').toString('base64')
 global.atob = s => Buffer.from(s, 'base64').toString('binary')
 global.TextEncoder = TextEncoder
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -798,6 +798,53 @@ sec('24. 下拉面板脱离滚动容器')
   // 面板已不在卡片内，抬升卡片层级的老办法成了死代码
   ok(!/\.card\.front\{/.test(ui), '移除不再需要的 .card.front 提层 hack')
   ok(!ui.includes("classList.add('front')"), '不再给卡片加 front 类')
+}
+
+sec('25. 地区识别：全量国家覆盖')
+{
+  const cls = n => {
+    const k = T.flagRegion(n) || T.REGIONS.find(x => x.re.test(n)).key
+    return T.REGIONS.find(x => x.key === k).cn
+  }
+  ok(T.REGIONS.length > 240, `地区表覆盖 ${T.REGIONS.length} 个（ISO 3166-1 共 249）`)
+
+  // 国旗 emoji 直接编码 ISO 码，比猜文字可靠 —— 机场爱写「🇪🇸 马德里」这种只有城市名的
+  ok(T.flagRegion('🇪🇸 马德里') === 'es', '国旗解码出西班牙')
+  ok(T.flagRegion('🇦🇶 南极') === 'aq', '冷门地区的国旗也认')
+  ok(T.flagRegion('无旗节点 01') === null, '没有国旗时返回 null 交给文字匹配')
+  ok(cls('🇪🇸 马德里 Madrid') === '西班牙', '只有城市名时靠国旗兜住')
+
+  // 名称互相包含的，长的必须排在前面
+  ok(cls('印度尼西亚 01') === '印尼', '印度尼西亚不被「印度」抢走')
+  ok(cls('印度 01') === '印度', '印度仍归印度')
+  ok(cls('南苏丹') === '南苏丹' && cls('苏丹') === '苏丹', '南苏丹与苏丹分得开')
+  ok(cls('北马其顿') === '北马其顿', '北马其顿独立成组')
+  ok(cls('法属圭亚那') === '法属圭亚那' && cls('圭亚那') === '圭亚那', '圭亚那与法属圭亚那分得开')
+  ok(cls('尼日利亚') === '尼日利亚' && cls('尼日尔') === '尼日尔', '尼日利亚与尼日尔分得开')
+
+  // 两字母代码不加词边界会闯祸：ID 命中 Madrid、TH 命中 North
+  ok(cls('Madrid Node') !== '印尼', 'Madrid 不被 ID 误判为印尼')
+  ok(cls('North Node') !== '泰国', 'North 不被 TH 误判为泰国')
+  ok(cls('My Node 01') !== '马来西亚', 'My 不被 MY 误判为马来西亚')
+  ok(T.REGIONS.find(r => r.key === 'jp').re.source.includes('\\bJP\\b'), '两字母代码带词边界')
+
+  // 繁体、简称、官方长名都要认
+  ok(cls('🇦🇹 奧地利') === '奥地利', '繁体「奧地利」')
+  ok(cls('中国澳门特别行政区') === '澳门', '官方长名剥出简称')
+  ok(cls('澳門 家宽') === '澳门', '繁体澳門')
+  ok(cls('澳洲 悉尼') === '澳大利亚', '澳洲=澳大利亚，且不与澳门混淆')
+
+  // 兜底仍在：认不出的不能报错
+  ok(cls('完全无法识别的节点') === '其他', '认不出时仍落到「其他」')
+
+  // 快照存的是抓取当时算好的 region。地区表一改，老快照必须重算，
+  // 否则 403 的源永远靠快照供节点，新规则对它就是不生效。
+  const wsrc3 = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
+  ok(/s\.nodes\.map\(n => \(\{ \.\.\.n, region: regionOf\(n\.raw\) \}\)\)/.test(wsrc3),
+     '读快照时重算地区，不沿用旧分类')
+  ok(wsrc3.includes('function regionOf'), '地区判定收敛到单一入口')
+  ok((wsrc3.match(/REGIONS\.find\(x => x\.re\.test/g) || []).length === 1,
+     '没有第二处各写各的地区判定')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
