@@ -177,11 +177,10 @@ sec('10. 管理端 UI 静态检查')
   ok(/setTimeout\(done,\s*\d+\)/.test(ui), '弹窗关闭有超时兜底')
   ok(ui.includes('toasts') && /setTimeout\(\(\) => el\.remove\(\),\s*\d+\)/.test(ui), 'toast 移除有超时兜底')
   ok(!/onclick="[^"]*confirm\(/.test(ui) && !ui.includes('window.confirm'), '无原生 confirm')
-  // .anim 用了 opacity/transform + fill:both，每张卡片会长期持有层叠上下文，
-  // 下拉面板的 z-index 被困在卡片内、被后面的兄弟卡片盖住，必须靠 .front 抬升。
-  ok(/\.card\.front\{[^}]*z-index/.test(ui), '存在 .card.front 抬升规则')
-  ok(ui.includes("closest('.card')?.classList.add('front')"), '展开下拉时抬升所在卡片')
-  ok(ui.includes("closest('.card')?.classList.remove('front')"), '关闭下拉时收回抬升')
+  // 下拉遮挡曾用 .card.front 抬升卡片层级来解，但那只对付得了兄弟卡片相互遮挡；
+  // 弹窗里的 overflow:auto 会直接裁掉面板，抬多高都没用。现改为展开时挪到 body
+  // 用 fixed 定位，两种情形一并解决 —— 详见「下拉面板脱离滚动容器」一节。
+  ok(ui.includes('document.body.appendChild(pop)'), '下拉展开时脱离原容器')
   // 同一标签写两个 style，后者会被浏览器静默丢弃
   ok(!/<[^>]+style="[^"]*"[^>]*style="/.test(ui), '无重复 style 属性')
   // 拖拽须实时让位而非 drop 时才换位；FLIP 负责位移动画
@@ -779,6 +778,26 @@ sec('23. 订阅源可编辑')
   ok(cols.trim().split(/\s+/).length === 9, `订阅源行 9 列（实际 ${cols.trim().split(/\s+/).length}）`)
   const wsrc2 = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
   ok(wsrc2.includes("CONF.delete('snap:'"), '删除订阅源时清理其快照')
+}
+
+sec('24. 下拉面板脱离滚动容器')
+{
+  const ui = T.adminHTML(true, true)
+  // 弹窗内容区是 overflow:auto，absolute 面板超出边界会被裁掉，
+  // 底部按钮区还盖在上面 —— z-index 救不回被裁的那半，必须挪出容器。
+  ok(ui.includes('document.body.appendChild(pop)'), '展开时把面板挪到 body')
+  ok(/\.selp\.portal\{[^}]*position:fixed/.test(ui), 'portal 状态用 fixed 定位')
+  ok(ui.includes('function placeSel'), '存在按触发器计算位置的函数')
+  ok(ui.includes('pop._home'), '记住原位置以便归位')
+  ok(ui.includes('pop._home.p.insertBefore'), '收起时放回原位，不滞留在 body')
+  // 面板挂在 body 上，这两处若不主动收起就会变成孤儿浮层
+  ok(/const close = v => \{\s*\/\/[^\n]*\n\s*closeAllSel\(\)/.test(ui), '弹窗关闭时先收起面板')
+  ok(/async function dash\(skip\)\{\s*\n?\s*closeAllSel\(\)/.test(ui), '整页重绘前先收起面板')
+  ok(ui.includes("addEventListener('scroll'"), '滚动时重新定位或收起')
+  ok(ui.includes("addEventListener('resize', closeAllSel)"), '窗口尺寸变化时收起')
+  // 面板已不在卡片内，抬升卡片层级的老办法成了死代码
+  ok(!/\.card\.front\{/.test(ui), '移除不再需要的 .card.front 提层 hack')
+  ok(!ui.includes("classList.add('front')"), '不再给卡片加 front 类')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

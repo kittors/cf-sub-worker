@@ -87,10 +87,9 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .sel.open .selb{border-color:var(--acc);box-shadow:0 0 0 3.5px var(--accBg)}
 .sel.open .selb .ic{transform:rotate(180deg)}
 @keyframes popIn{from{opacity:0;transform:translateY(-5px) scale(.98)}to{opacity:1;transform:none}}
-/* .anim 的入场动画含 opacity/transform，fill:both 会让每张卡片长期持有自己的层叠上下文，
-   面板的 z-index 被困在卡片内部、被后面的兄弟卡片盖住。展开时给所在卡片加 .front 抬升。 */
-.card.front{position:relative;z-index:40}
 .selp{position:absolute;top:calc(100% + 5px);left:0;right:0;background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--shP);padding:5px;z-index:30;max-height:250px;overflow:auto;animation:popIn .18s var(--e) both}
+/* 打开时挪到 body 上，脱离弹窗的滚动裁剪区；位置由 JS 按触发器算 */
+.selp.portal{position:fixed;top:auto;left:auto;right:auto;z-index:120}
 .selo{padding:8px 10px;border-radius:7px;font-size:13.5px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .12s}
 .selo:hover{background:var(--hov)}
 .selo.on{color:var(--acc);font-weight:500}
@@ -158,7 +157,7 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
    subgrid 让每行沿用父容器的列轨道，多行才真正逐列对齐。 */
 .uplist{display:grid;gap:7px}
 .uplist.own{grid-template-columns:auto auto auto minmax(0,1fr) auto auto}
-.uplist.src{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto auto}
+.uplist.src{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto auto auto}
 .uplist.lib{grid-template-columns:auto minmax(0,1fr) auto auto}
 .up{grid-column:1/-1;display:grid;grid-template-columns:subgrid;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--bd2);border-radius:10px;transition:border-color .16s var(--e),background .16s var(--e)}
 .up:hover{border-color:var(--bd);background:var(--hov)}
@@ -166,6 +165,14 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 .up .u{color:var(--tx3);font:11.5px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .up.src .tgt{font-variant-numeric:tabular-nums;white-space:nowrap;justify-self:end}
 .up.src .tgt.hot{background:var(--warnBg);border-color:var(--warnBd);color:var(--warn)}
+/* 「手动」是状态说明不是强调，用中性色，跟 accent 色的「自定义」标签区分开 */
+.tag.manual{background:var(--bg);color:var(--tx2);border-color:var(--bd2)}
+.up.src .snap{margin-left:9px;color:var(--tx3);font-size:11.5px}
+/* 用量拿不到时的占位，点进去看抓取诊断 */
+.up.src .tgt.mute{color:var(--tx3);border-style:dashed;cursor:pointer;transition:color .15s,border-color .15s}
+.up.src .tgt.mute:hover{color:var(--acc);border-color:var(--accBd)}
+/* 局部刷新期间给节点卡片一点反馈，但不换骨架屏——那会整块闪 */
+#nodecard.busy{opacity:.55;transition:opacity .2s;pointer-events:none}
 .bar{height:4px;border-radius:2px;background:var(--bd2);overflow:hidden;width:46px;align-self:center}
 .bar i{display:block;height:100%;background:var(--ok);border-radius:2px;transition:width .3s var(--e)}
 .bar.hot i{background:var(--warn)}
@@ -272,7 +279,7 @@ const authed = true, inited = true
 const app = document.getElementById('app')
 const tsBox = document.getElementById('toasts')
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-const S={"ok":true,"at":1785848668086,"stale":false,"errors":[],"subUrl":"https://sub.example.com/sub?token=TOKEN-EXAMPLE","upstreams":[{"id":"a1","name":"示例机场 A","url":"https://a.example.com/api/v1/client/subscribe?token=xxxx","enabled":true},{"id":"a2","name":"示例机场 B","url":"https://b.example.com/sub?token=yyyy","enabled":true}],"meta":{"a1":{"up":98135617755,"down":321529098078,"total":1288490188800,"expire":1786367068},"a2":{"up":0,"down":966367641600,"total":1073741824000,"expire":1801400668}},"bySrc":{"jp":{"示例机场 A":4},"hk":{"示例机场 A":4,"示例机场 B":2},"sg":{"示例机场 B":3},"us":{"示例机场 B":5}},"regions":[{"key":"jp","flag":"🇯🇵","cn":"日本","nodes":[{"key":"jp::0","name":"🇯🇵 日本 01","auto":"🇯🇵 日本 01","raw":"2x专线-日本-1","upName":"示例机场 A","custom":false,"off":false},{"key":"jp::1","name":"🇯🇵 东京主力","auto":"🇯🇵 日本 02","raw":"2x专线-日本-2","upName":"示例机场 A","custom":true,"off":false},{"key":"jp::2","name":"🇯🇵 日本 03","auto":"🇯🇵 日本 03","raw":"2x专线-日本-3","upName":"示例机场 A","custom":false,"off":false},{"key":"jp::3","name":"🇯🇵 日本 04","auto":"🇯🇵 日本 04","raw":"2x专线-日本-4","upName":"示例机场 A","custom":false,"off":false}]},{"key":"hk","flag":"🇭🇰","cn":"香港","nodes":[{"key":"hk::0","name":"🇭🇰 香港 01","auto":"🇭🇰 香港 01","raw":"2x专线-香港-1","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::1","name":"🇭🇰 香港 02","auto":"🇭🇰 香港 02","raw":"2x专线-香港-2","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::2","name":"🇭🇰 香港 03","auto":"🇭🇰 香港 03","raw":"2x专线-香港-3","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::3","name":"🇭🇰 香港 04","auto":"🇭🇰 香港 04","raw":"2x专线-香港-4","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::4","name":"🇭🇰 香港 05","auto":"🇭🇰 香港 05","raw":"2x专线-香港-5","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::5","name":"🇭🇰 香港 06","auto":"🇭🇰 香港 06","raw":"2x专线-香港-6","upName":"示例机场 A","custom":false,"off":false}]},{"key":"sg","flag":"🇸🇬","cn":"新加坡","nodes":[{"key":"sg::0","name":"🇸🇬 新加坡 01","auto":"🇸🇬 新加坡 01","raw":"2x专线-新加坡-1","upName":"示例机场 B","custom":false,"off":false},{"key":"sg::1","name":"🇸🇬 新加坡 02","auto":"🇸🇬 新加坡 02","raw":"2x专线-新加坡-2","upName":"示例机场 B","custom":false,"off":false},{"key":"sg::2","name":"🇸🇬 新加坡 03","auto":"🇸🇬 新加坡 03","raw":"2x专线-新加坡-3","upName":"示例机场 B","custom":false,"off":false}]},{"key":"us","flag":"🇺🇸","cn":"美国","nodes":[{"key":"us::0","name":"🇺🇸 美国 01","auto":"🇺🇸 美国 01","raw":"2x专线-美国-1","upName":"示例机场 B","custom":false,"off":false},{"key":"us::1","name":"🇺🇸 美国 02","auto":"🇺🇸 美国 02","raw":"2x专线-美国-2","upName":"示例机场 B","custom":false,"off":false},{"key":"us::2","name":"🇺🇸 美国 03","auto":"🇺🇸 美国 03","raw":"2x专线-美国-3","upName":"示例机场 B","custom":false,"off":false},{"key":"us::3","name":"🇺🇸 美国 04","auto":"🇺🇸 美国 04","raw":"2x专线-美国-4","upName":"示例机场 B","custom":false,"off":false},{"key":"us::4","name":"🇺🇸 美国 05","auto":"🇺🇸 美国 05","raw":"2x专线-美国-5","upName":"示例机场 B","custom":false,"off":false}]}]};const R={"ok":true,"newToken":"TOKEN-EXAMPLE-NEW-000000000000","profiles":[{"id":"main","name":"主订阅","token":"TOKEN-EXAMPLE-MAIN-0000000000000","enabled":true,"own":"all","ups":"all","regions":"all","pols":"all","policies":"inherit","mode":"whitelist","note":""},{"id":"f2","name":"手机","token":"TOKEN-EXAMPLE-PHONE-000000000000","enabled":true,"own":["a"],"ups":"all","regions":["jp","hk"],"pols":"all","policies":[{"id":"ai","name":"AI"},{"id":"m","name":"YouTube"}],"mode":"blacklist","note":"省电，精简策略"},{"id":"f3","name":"共享给朋友","token":"TOKEN-EXAMPLE-SHARED-00000000000","enabled":true,"own":[],"ups":["a1"],"regions":["jp","sg"],"pols":"all","policies":"inherit","mode":"whitelist","note":"不含自建节点"}],"opts":{"own":[{"v":"a","label":"自建-美西"},{"v":"b","label":"自建-备用"}],"ups":[{"v":"a1","label":"示例机场 A"},{"v":"a2","label":"示例机场 B"}],"regions":[{"v":"jp","label":"🇯🇵 日本"},{"v":"hk","label":"🇭🇰 香港"},{"v":"sg","label":"🇸🇬 新加坡"},{"v":"us","label":"🇺🇸 美国"}],"pols":[{"v":"youtube","label":"📺 YouTube"},{"v":"media","label":"🎬 流媒体"},{"v":"social","label":"💬 社交媒体"},{"v":"openai","label":"🤖 OpenAI"},{"v":"ai","label":"🤖 AI 服务"},{"v":"crypto","label":"💰 加密货币"},{"v":"tg","label":"✈️ Telegram"},{"v":"dev","label":"⚙️ 开发者"},{"v":"apple","label":"🍎 Apple"},{"v":"ms","label":"🪟 Microsoft"},{"v":"misc","label":"🌐 常用境外"}]}};const G=[{"id":"youtube","name":"📺 YouTube","target":"region:jp","strict":false,"presets":["youtube"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"media","name":"🎬 流媒体","target":"region:jp","strict":false,"presets":["media"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"social","name":"💬 社交媒体","target":"region:jp","strict":false,"presets":["social"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"openai","name":"🤖 OpenAI","target":["own:a","own:b"],"strict":true,"presets":["openai"],"domains":[],"keywords":[],"processes":["ChatGPT"],"enabled":true},{"id":"ai","name":"🤖 AI 服务","target":["own:a","own:b"],"strict":true,"presets":["ai","aitest","google"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"crypto","name":"💰 加密货币","target":["own:a","own:b"],"strict":false,"presets":["crypto"],"domains":[],"keywords":["binance"],"processes":[],"enabled":true},{"id":"tg","name":"✈️ Telegram","target":"all","strict":false,"presets":["telegram"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"dev","name":"⚙️ 开发者","target":"all","strict":false,"presets":["dev"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"apple","name":"🍎 Apple","target":"direct","strict":false,"presets":["apple"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"ms","name":"🪟 Microsoft","target":"direct","strict":false,"presets":["microsoft"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"misc","name":"🌐 常用境外","target":"all","strict":false,"presets":["misc"],"domains":[],"keywords":[],"processes":[],"enabled":true}];const LIB={"openai":{"name":"OpenAI","hint":"ChatGPT 全链路，含认证/支付/风控依赖","domains":["chatgpt.com","openai.com","oaistatic.com","oaiusercontent.com","chat.openai.com","desktop.chat.openai.com","ios.chat.openai.com","android.chat.openai.com","auth.openai.com","auth0.openai.com","setup.auth.openai.com","cdn.workos.com","setup.workos.com","forwarder.workos.com","images.workoscdn.com","workos.imgix.net","ct.sendgrid.net","js.stripe.com","stripe.com","statsig.com","statsigapi.net","events.statsigapi.net","featuregates.org","featureassets.org","prodregistryv2.org","intercom.io","intercomcdn.com","js.intercomcdn.com","rum.browser-intake-datadoghq.com","browser-intake-datadoghq.com","o207216.ingest.sentry.io","o33249.ingest.sentry.io","sentry.io","chatgpt.livekit.cloud","host.livekit.cloud","turn.livekit.cloud","challenges.cloudflare.com","client-api.arkoselabs.com","openai-api.arkoselabs.com","static.cloudflareinsights.com","algolia.net","auth0.com","launchdarkly.com","segment.io","openaiapi-site.azureedge.net","production-openaicom-storage.azureedge.net","openaicomproductionae4b.blob.core.windows.net","openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net"]},"ai":{"name":"AI 服务","hint":"Claude / Gemini / DeepSeek / Copilot 等","domains":["anthropic.com","claude.ai","api.anthropic.com","googleapis.com","gemini.google.com","generativelanguage.googleapis.com","bard.google.com","deepmind.google","aistudio.google.com","cohere.ai","api.cohere.ai","mistral.ai","api.mistral.ai","perplexity.ai","perplexity.com","githubcopilot.com","copilot.microsoft.com","huggingface.co","together.xyz","fireworks.ai","groq.com","api.groq.com","deepseek.com","api.deepseek.com","x.ai","grok.com","moonshot.cn","bigmodel.cn"]},"aitest":{"name":"IP 检测","hint":"验证出口用，务必与服务端 ai-proxy 表保持一致","domains":["ping0.cc","ip.net.coffee"]},"google":{"name":"Google","hint":"账号基础设施；不整族同出口会被判定异地","domains":["google.com","gstatic.com","googleusercontent.com","google.cn","googlesource.com","googletagmanager.com","google-analytics.com","dns.google","withgoogle.com","goo.gl","ggpht.com"]},"media":{"name":"流媒体","hint":"Netflix / Disney+ / Spotify / Twitch 等","domains":["netflix.com","nflxvideo.net","nflximg.net","nflxext.com","nflxso.net","spotify.com","scdn.co","spotifycdn.com","disneyplus.com","dssott.com","bamgrid.com","disney-plus.net","hulu.com","hbomax.com","max.com","primevideo.com","aiv-cdn.net","twitch.tv","ttvnw.net","jtvnw.net","crunchyroll.com","abema.tv","nicovideo.jp","bilibili.tv","iq.com","viu.com"]},"youtube":{"name":"YouTube","hint":"含 API 与 CDN；须排在 Google 规则之前","domains":["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtube-nocookie.com","youtubei.googleapis.com","yt3.ggpht.com"]},"social":{"name":"社交媒体","hint":"X / Meta 系 / TikTok / Reddit 等","domains":["twitter.com","x.com","t.co","twimg.com","twitterinc.com","instagram.com","cdninstagram.com","facebook.com","fbcdn.net","messenger.com","threads.net","whatsapp.com","tiktok.com","tiktokv.com","tiktokcdn.com","tiktokcdn-us.com","byteoversea.com","ibytedtos.com","muscdn.com","musical.ly","reddit.com","redditmedia.com","redd.it","redditstatic.com","discord.com","discord.gg","discordapp.com","discordapp.net","pinterest.com","tumblr.com","pixiv.net","pximg.net","medium.com","quora.com"]},"telegram":{"name":"Telegram","hint":"含 DC 网段，建议配合 IP-CIDR","domains":["telegram.org","t.me","telegram.me","telesco.pe","tdesktop.com","telegra.ph"]},"apple":{"name":"Apple","hint":"默认直连更快；跨区账号才需走代理","domains":["apple.com","icloud.com","icloud-content.com","mzstatic.com","apple-cloudkit.com","cdn-apple.com","apple.news","applemusic.com","itunes.com","me.com","aaplimg.com"]},"microsoft":{"name":"Microsoft","hint":"Office / OneDrive / Teams / Xbox","domains":["microsoft.com","microsoftonline.com","office.com","office365.com","live.com","windows.net","windowsupdate.com","msftconnecttest.com","sharepoint.com","onedrive.com","skype.com","teams.microsoft.com","xbox.com","xboxlive.com","msn.com","bing.com"]},"dev":{"name":"开发者","hint":"GitHub / npm / Docker / StackOverflow","domains":["github.com","github.io","githubusercontent.com","githubassets.com","gitlab.com","bitbucket.org","npmjs.com","npmjs.org","yarnpkg.com","docker.com","docker.io","pypi.org","pythonhosted.org","rubygems.org","crates.io","golang.org","go.dev","stackoverflow.com","stackexchange.com","sourceforge.net","jsdelivr.net","unpkg.com"]},"crypto":{"name":"加密货币","hint":"交易所与行情站","domains":["binance.com","binance.us","okx.com","bybit.com","coinbase.com","kraken.com","huobi.com","gate.io","kucoin.com","bitfinex.com","coinmarketcap.com","coingecko.com","tradingview.com"]},"misc":{"name":"常用境外站","hint":"Wikipedia / 归档 / 视频等","domains":["wikipedia.org","wikimedia.org","archive.org","vimeo.com","dailymotion.com","imgur.com","patreon.com","producthunt.com","notion.so","figma.com","dropbox.com","slack.com","zoom.us","steamcommunity.com","steampowered.com"]}};const TG=[{"v":"all","label":"🚀 节点选择（全部）"},{"v":"own:a","label":"自建-美西（自有）"},{"v":"own:b","label":"自建-备用（自有）"},{"v":"region:jp","label":"🇯🇵 日本（机场）"},{"v":"region:hk","label":"🇭🇰 香港（机场）"},{"v":"region:sg","label":"🇸🇬 新加坡（机场）"},{"v":"region:us","label":"🇺🇸 美国（机场）"},{"v":"direct","label":"直连"},{"v":"reject","label":"拒绝"}];const OW={"a":{"name":"自建-美西","type":"vless","s":"node.example.com","p":443,"u":"11111111-2222-3333-4444-555555555555","sni":"www.bing.com","pk":"PLACEHOLDERPUBKEY000000000000000000000000","sid":"0123456789abcdef","net":"tcp","flow":"xtls-rprx-vision"},"b":{"name":"自建-备用","type":"hysteria2","s":"node.example.com","p":8443,"ports":"50000-50020","u":"11111111-2222-3333-4444-555555555555","sni":"node.example.com","obfs":"salamander","opwd":"obfspass"}};
+const S={"ok":true,"at":1785854487419,"stale":false,"errors":[],"subUrl":"https://sub.example.com/sub?token=TOKEN-EXAMPLE","upstreams":[{"id":"a1","name":"示例机场 A","url":"https://a.example.com/api/v1/client/subscribe?token=xxxx","enabled":true},{"id":"a2","name":"示例机场 B","url":"https://b.example.com/sub?token=yyyy","enabled":true}],"meta":{"a1":{"up":98135617755,"down":321529098078,"total":1288490188800,"expire":1786372887},"a2":{"up":0,"down":966367641600,"total":1073741824000,"expire":1801406487}},"bySrc":{"jp":{"示例机场 A":4},"hk":{"示例机场 A":4,"示例机场 B":2},"sg":{"示例机场 B":3},"us":{"示例机场 B":5}},"regions":[{"key":"jp","flag":"🇯🇵","cn":"日本","nodes":[{"key":"jp::0","name":"🇯🇵 日本 01","auto":"🇯🇵 日本 01","raw":"2x专线-日本-1","upName":"示例机场 A","custom":false,"off":false},{"key":"jp::1","name":"🇯🇵 东京主力","auto":"🇯🇵 日本 02","raw":"2x专线-日本-2","upName":"示例机场 A","custom":true,"off":false},{"key":"jp::2","name":"🇯🇵 日本 03","auto":"🇯🇵 日本 03","raw":"2x专线-日本-3","upName":"示例机场 A","custom":false,"off":false},{"key":"jp::3","name":"🇯🇵 日本 04","auto":"🇯🇵 日本 04","raw":"2x专线-日本-4","upName":"示例机场 A","custom":false,"off":false}]},{"key":"hk","flag":"🇭🇰","cn":"香港","nodes":[{"key":"hk::0","name":"🇭🇰 香港 01","auto":"🇭🇰 香港 01","raw":"2x专线-香港-1","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::1","name":"🇭🇰 香港 02","auto":"🇭🇰 香港 02","raw":"2x专线-香港-2","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::2","name":"🇭🇰 香港 03","auto":"🇭🇰 香港 03","raw":"2x专线-香港-3","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::3","name":"🇭🇰 香港 04","auto":"🇭🇰 香港 04","raw":"2x专线-香港-4","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::4","name":"🇭🇰 香港 05","auto":"🇭🇰 香港 05","raw":"2x专线-香港-5","upName":"示例机场 A","custom":false,"off":false},{"key":"hk::5","name":"🇭🇰 香港 06","auto":"🇭🇰 香港 06","raw":"2x专线-香港-6","upName":"示例机场 A","custom":false,"off":false}]},{"key":"sg","flag":"🇸🇬","cn":"新加坡","nodes":[{"key":"sg::0","name":"🇸🇬 新加坡 01","auto":"🇸🇬 新加坡 01","raw":"2x专线-新加坡-1","upName":"示例机场 B","custom":false,"off":false},{"key":"sg::1","name":"🇸🇬 新加坡 02","auto":"🇸🇬 新加坡 02","raw":"2x专线-新加坡-2","upName":"示例机场 B","custom":false,"off":false},{"key":"sg::2","name":"🇸🇬 新加坡 03","auto":"🇸🇬 新加坡 03","raw":"2x专线-新加坡-3","upName":"示例机场 B","custom":false,"off":false}]},{"key":"us","flag":"🇺🇸","cn":"美国","nodes":[{"key":"us::0","name":"🇺🇸 美国 01","auto":"🇺🇸 美国 01","raw":"2x专线-美国-1","upName":"示例机场 B","custom":false,"off":false},{"key":"us::1","name":"🇺🇸 美国 02","auto":"🇺🇸 美国 02","raw":"2x专线-美国-2","upName":"示例机场 B","custom":false,"off":false},{"key":"us::2","name":"🇺🇸 美国 03","auto":"🇺🇸 美国 03","raw":"2x专线-美国-3","upName":"示例机场 B","custom":false,"off":false},{"key":"us::3","name":"🇺🇸 美国 04","auto":"🇺🇸 美国 04","raw":"2x专线-美国-4","upName":"示例机场 B","custom":false,"off":false},{"key":"us::4","name":"🇺🇸 美国 05","auto":"🇺🇸 美国 05","raw":"2x专线-美国-5","upName":"示例机场 B","custom":false,"off":false}]}]};const R={"ok":true,"newToken":"TOKEN-EXAMPLE-NEW-000000000000","profiles":[{"id":"main","name":"主订阅","token":"TOKEN-EXAMPLE-MAIN-0000000000000","enabled":true,"own":"all","ups":"all","regions":"all","pols":"all","policies":"inherit","mode":"whitelist","note":""},{"id":"f2","name":"手机","token":"TOKEN-EXAMPLE-PHONE-000000000000","enabled":true,"own":["a"],"ups":"all","regions":["jp","hk"],"pols":"all","policies":[{"id":"ai","name":"AI"},{"id":"m","name":"YouTube"}],"mode":"blacklist","note":"省电，精简策略"},{"id":"f3","name":"共享给朋友","token":"TOKEN-EXAMPLE-SHARED-00000000000","enabled":true,"own":[],"ups":["a1"],"regions":["jp","sg"],"pols":"all","policies":"inherit","mode":"whitelist","note":"不含自建节点"}],"opts":{"own":[{"v":"a","label":"自建-美西"},{"v":"b","label":"自建-备用"}],"ups":[{"v":"a1","label":"示例机场 A"},{"v":"a2","label":"示例机场 B"}],"regions":[{"v":"jp","label":"🇯🇵 日本"},{"v":"hk","label":"🇭🇰 香港"},{"v":"sg","label":"🇸🇬 新加坡"},{"v":"us","label":"🇺🇸 美国"}],"pols":[{"v":"youtube","label":"📺 YouTube"},{"v":"media","label":"🎬 流媒体"},{"v":"social","label":"💬 社交媒体"},{"v":"openai","label":"🤖 OpenAI"},{"v":"ai","label":"🤖 AI 服务"},{"v":"crypto","label":"💰 加密货币"},{"v":"tg","label":"✈️ Telegram"},{"v":"dev","label":"⚙️ 开发者"},{"v":"apple","label":"🍎 Apple"},{"v":"ms","label":"🪟 Microsoft"},{"v":"misc","label":"🌐 常用境外"}]}};const G=[{"id":"youtube","name":"📺 YouTube","target":"region:jp","strict":false,"presets":["youtube"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"media","name":"🎬 流媒体","target":"region:jp","strict":false,"presets":["media"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"social","name":"💬 社交媒体","target":"region:jp","strict":false,"presets":["social"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"openai","name":"🤖 OpenAI","target":["own:a","own:b"],"strict":true,"presets":["openai"],"domains":[],"keywords":[],"processes":["ChatGPT"],"enabled":true},{"id":"ai","name":"🤖 AI 服务","target":["own:a","own:b"],"strict":true,"presets":["ai","aitest","google"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"crypto","name":"💰 加密货币","target":["own:a","own:b"],"strict":false,"presets":["crypto"],"domains":[],"keywords":["binance"],"processes":[],"enabled":true},{"id":"tg","name":"✈️ Telegram","target":"all","strict":false,"presets":["telegram"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"dev","name":"⚙️ 开发者","target":"all","strict":false,"presets":["dev"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"apple","name":"🍎 Apple","target":"direct","strict":false,"presets":["apple"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"ms","name":"🪟 Microsoft","target":"direct","strict":false,"presets":["microsoft"],"domains":[],"keywords":[],"processes":[],"enabled":true},{"id":"misc","name":"🌐 常用境外","target":"all","strict":false,"presets":["misc"],"domains":[],"keywords":[],"processes":[],"enabled":true}];const LIB={"openai":{"name":"OpenAI","hint":"ChatGPT 全链路，含认证/支付/风控依赖","domains":["chatgpt.com","openai.com","oaistatic.com","oaiusercontent.com","chat.openai.com","desktop.chat.openai.com","ios.chat.openai.com","android.chat.openai.com","auth.openai.com","auth0.openai.com","setup.auth.openai.com","cdn.workos.com","setup.workos.com","forwarder.workos.com","images.workoscdn.com","workos.imgix.net","ct.sendgrid.net","js.stripe.com","stripe.com","statsig.com","statsigapi.net","events.statsigapi.net","featuregates.org","featureassets.org","prodregistryv2.org","intercom.io","intercomcdn.com","js.intercomcdn.com","rum.browser-intake-datadoghq.com","browser-intake-datadoghq.com","o207216.ingest.sentry.io","o33249.ingest.sentry.io","sentry.io","chatgpt.livekit.cloud","host.livekit.cloud","turn.livekit.cloud","challenges.cloudflare.com","client-api.arkoselabs.com","openai-api.arkoselabs.com","static.cloudflareinsights.com","algolia.net","auth0.com","launchdarkly.com","segment.io","openaiapi-site.azureedge.net","production-openaicom-storage.azureedge.net","openaicomproductionae4b.blob.core.windows.net","openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net"]},"ai":{"name":"AI 服务","hint":"Claude / Gemini / DeepSeek / Copilot 等","domains":["anthropic.com","claude.ai","api.anthropic.com","googleapis.com","gemini.google.com","generativelanguage.googleapis.com","bard.google.com","deepmind.google","aistudio.google.com","cohere.ai","api.cohere.ai","mistral.ai","api.mistral.ai","perplexity.ai","perplexity.com","githubcopilot.com","copilot.microsoft.com","huggingface.co","together.xyz","fireworks.ai","groq.com","api.groq.com","deepseek.com","api.deepseek.com","x.ai","grok.com","moonshot.cn","bigmodel.cn"]},"aitest":{"name":"IP 检测","hint":"验证出口用，务必与服务端 ai-proxy 表保持一致","domains":["ping0.cc","ip.net.coffee"]},"google":{"name":"Google","hint":"账号基础设施；不整族同出口会被判定异地","domains":["google.com","gstatic.com","googleusercontent.com","google.cn","googlesource.com","googletagmanager.com","google-analytics.com","dns.google","withgoogle.com","goo.gl","ggpht.com"]},"media":{"name":"流媒体","hint":"Netflix / Disney+ / Spotify / Twitch 等","domains":["netflix.com","nflxvideo.net","nflximg.net","nflxext.com","nflxso.net","spotify.com","scdn.co","spotifycdn.com","disneyplus.com","dssott.com","bamgrid.com","disney-plus.net","hulu.com","hbomax.com","max.com","primevideo.com","aiv-cdn.net","twitch.tv","ttvnw.net","jtvnw.net","crunchyroll.com","abema.tv","nicovideo.jp","bilibili.tv","iq.com","viu.com"]},"youtube":{"name":"YouTube","hint":"含 API 与 CDN；须排在 Google 规则之前","domains":["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtube-nocookie.com","youtubei.googleapis.com","yt3.ggpht.com"]},"social":{"name":"社交媒体","hint":"X / Meta 系 / TikTok / Reddit 等","domains":["twitter.com","x.com","t.co","twimg.com","twitterinc.com","instagram.com","cdninstagram.com","facebook.com","fbcdn.net","messenger.com","threads.net","whatsapp.com","tiktok.com","tiktokv.com","tiktokcdn.com","tiktokcdn-us.com","byteoversea.com","ibytedtos.com","muscdn.com","musical.ly","reddit.com","redditmedia.com","redd.it","redditstatic.com","discord.com","discord.gg","discordapp.com","discordapp.net","pinterest.com","tumblr.com","pixiv.net","pximg.net","medium.com","quora.com"]},"telegram":{"name":"Telegram","hint":"含 DC 网段，建议配合 IP-CIDR","domains":["telegram.org","t.me","telegram.me","telesco.pe","tdesktop.com","telegra.ph"]},"apple":{"name":"Apple","hint":"默认直连更快；跨区账号才需走代理","domains":["apple.com","icloud.com","icloud-content.com","mzstatic.com","apple-cloudkit.com","cdn-apple.com","apple.news","applemusic.com","itunes.com","me.com","aaplimg.com"]},"microsoft":{"name":"Microsoft","hint":"Office / OneDrive / Teams / Xbox","domains":["microsoft.com","microsoftonline.com","office.com","office365.com","live.com","windows.net","windowsupdate.com","msftconnecttest.com","sharepoint.com","onedrive.com","skype.com","teams.microsoft.com","xbox.com","xboxlive.com","msn.com","bing.com"]},"dev":{"name":"开发者","hint":"GitHub / npm / Docker / StackOverflow","domains":["github.com","github.io","githubusercontent.com","githubassets.com","gitlab.com","bitbucket.org","npmjs.com","npmjs.org","yarnpkg.com","docker.com","docker.io","pypi.org","pythonhosted.org","rubygems.org","crates.io","golang.org","go.dev","stackoverflow.com","stackexchange.com","sourceforge.net","jsdelivr.net","unpkg.com"]},"crypto":{"name":"加密货币","hint":"交易所与行情站","domains":["binance.com","binance.us","okx.com","bybit.com","coinbase.com","kraken.com","huobi.com","gate.io","kucoin.com","bitfinex.com","coinmarketcap.com","coingecko.com","tradingview.com"]},"misc":{"name":"常用境外站","hint":"Wikipedia / 归档 / 视频等","domains":["wikipedia.org","wikimedia.org","archive.org","vimeo.com","dailymotion.com","imgur.com","patreon.com","producthunt.com","notion.so","figma.com","dropbox.com","slack.com","zoom.us","steamcommunity.com","steampowered.com"]}};const TG=[{"v":"all","label":"🚀 节点选择（全部）"},{"v":"own:a","label":"自建-美西（自有）"},{"v":"own:b","label":"自建-备用（自有）"},{"v":"region:jp","label":"🇯🇵 日本（机场）"},{"v":"region:hk","label":"🇭🇰 香港（机场）"},{"v":"region:sg","label":"🇸🇬 新加坡（机场）"},{"v":"region:us","label":"🇺🇸 美国（机场）"},{"v":"direct","label":"直连"},{"v":"reject","label":"拒绝"}];const OW={"a":{"name":"自建-美西","type":"vless","s":"node.example.com","p":443,"u":"11111111-2222-3333-4444-555555555555","sni":"www.bing.com","pk":"PLACEHOLDERPUBKEY000000000000000000000000","sid":"0123456789abcdef","net":"tcp","flow":"xtls-rprx-vision"},"b":{"name":"自建-备用","type":"hysteria2","s":"node.example.com","p":8443,"ports":"50000-50020","u":"11111111-2222-3333-4444-555555555555","sni":"node.example.com","obfs":"salamander","opwd":"obfspass"}};
 const api=async(p,b)=>{await new Promise(r=>setTimeout(r,10));
  if(p==='/api/state')return JSON.parse(JSON.stringify(S));
  if(p==='/api/settings')return {ok:true,settings:{domain:'sub.example.com',directDomains:['api.example.com'],directIPs:['203.0.113.10']}};
@@ -302,7 +309,7 @@ function toast(msg, err){
   el.dataset.t = setTimeout(el.kill, 2600)
 }
 
-function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, onMount}){
+function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, noCancel = false, onMount}){
   return new Promise(resolve => {
     const bd = document.createElement('div')
     bd.className = 'bd'
@@ -312,7 +319,7 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
         ${html ? `<div class="bdy">${html}</div>` : ''}
         ${fields.length ? `<div class="bdy">${fields.map((f,i)=>`<input data-i="${i}" placeholder="${esc(f.ph||'')}" value="${esc(f.val||'')}">`).join('')}</div>` : ''}
       </div>
-      <div class="ft"><button class="g" data-x>取消</button>
+      <div class="ft">${noCancel?'':'<button class="g" data-x>取消</button>'}
         <button data-ok ${danger?'style="background:var(--warn)"':''}>${esc(ok)}</button></div>
     </div>`
     document.body.appendChild(bd)
@@ -332,6 +339,8 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
     // 双保险：animationend 正常时立即清理；若动画被系统「减少动态效果」禁用
     // 或因任何原因不触发，400ms 后强制移除，绝不让遮罩留在页面上。
     const close = v => {
+      // 展开中的下拉面板此刻挂在 body 上，bd.remove() 带不走它，会留在页面上
+      closeAllSel()
       const done = () => { bd.remove(); document.removeEventListener('keydown', onKey) }
       bd.classList.add('out')
       bd.addEventListener('animationend', done, { once: true })
@@ -383,14 +392,12 @@ function bindSelect(root){
       sel.dataset.v = multi ? picked.join('|') : (picked[0] || '')
       btn.innerHTML = esc(selLabel(opts, picked, multi)) + icon('down','s')
     }
+    sel._pop = pop
     btn.onclick = e => {
       e.stopPropagation()
       const open = sel.classList.contains('open')
       closeAllSel()
-      if (!open) {
-        sel.classList.add('open'); pop.hidden = false
-        sel.closest('.card')?.classList.add('front')
-      }
+      if (!open) openSel(sel, btn, pop)
     }
     pop.querySelectorAll('.selo').forEach(o => {
       o.onclick = e => {
@@ -409,14 +416,58 @@ function bindSelect(root){
     })
   })
 }
+// 下拉面板打开时挪到 body 上、改用 fixed 定位。
+// 弹窗内容区是 overflow:auto 的滚动容器，absolute 面板一旦超出边界就被裁掉，
+// 底部按钮区还会盖在它上面 —— 光调 z-index 救不回被裁的那半，必须脱离容器。
+function openSel(sel, btn, pop){
+  if (!pop._home) pop._home = { p: pop.parentNode, n: pop.nextSibling }
+  document.body.appendChild(pop)
+  pop.classList.add('portal')
+  pop.hidden = false
+  sel.classList.add('open')
+  placeSel(btn, pop)
+}
+function placeSel(btn, pop){
+  const r = btn.getBoundingClientRect(), gap = 5, pad = 10
+  pop.style.width = r.width + 'px'
+  pop.style.left = r.left + 'px'
+  pop.style.maxHeight = ''
+  const below = innerHeight - r.bottom - gap - pad
+  const above = r.top - gap - pad
+  const need = pop.scrollHeight
+  // 下方放不下、且上方更宽敞时朝上展开
+  if (need > below && above > below) {
+    pop.style.maxHeight = Math.min(250, above) + 'px'
+    pop.style.top = Math.max(pad, r.top - gap - Math.min(need, above, 250)) + 'px'
+  } else {
+    pop.style.maxHeight = Math.min(250, below) + 'px'
+    pop.style.top = (r.bottom + gap) + 'px'
+  }
+}
 function closeAllSel(){
   document.querySelectorAll('.sel.open').forEach(s => {
     s.classList.remove('open')
-    s.querySelector('.selp').hidden = true
-    s.closest('.card')?.classList.remove('front')
+    const pop = s._pop
+    if (!pop) return
+    pop.hidden = true
+    pop.classList.remove('portal')
+    pop.style.cssText = ''
+    // 放回原位，否则下次重绘这块 DOM 时面板会被落在 body 上
+    if (pop._home) pop._home.p.insertBefore(pop, pop._home.n)
   })
 }
 document.addEventListener('click', closeAllSel)
+// 页面或弹窗滚动后按钮就挪位了，面板得跟上；跟不上就收起，别浮在半空
+addEventListener('scroll', () => {
+  document.querySelectorAll('.sel.open').forEach(s => {
+    const btn = s.querySelector('.selb'), pop = s._pop
+    if (!btn || !pop) return
+    const r = btn.getBoundingClientRect()
+    if (r.bottom < 0 || r.top > innerHeight) return closeAllSel()
+    placeSel(btn, pop)
+  })
+}, true)
+addEventListener('resize', closeAllSel)
 
 // 顶栏常驻。整页 innerHTML 重建会让它的入场动画每次重播，表现为切 tab 时上方闪一下。
 // 这里首次渲染后只做增量更新：改统计文案、切 tab 高亮。
@@ -474,6 +525,7 @@ window.doLogin = async () => {
 }
 
 async function dash(skip){
+  closeAllSel()      // 面板挂在 body 上，重建页面带不走它
   if (!skip) skeleton()
   // 每个 tab 只拉自己要的，且并行发出——串行等两个请求是之前切 tab 卡顿的主因之一
   const jobs = []
@@ -558,14 +610,15 @@ function viewNode(){
   h += `<div class="card anim" style="animation-delay:.06s"><div class="ttl">订阅源<span class="sp"></span>
     <button class="sm" onclick="addUp()">${icon('plus','s')}添加</button></div>`
   h += '<div class="uplist src">'
-  h += ST.upstreams.map(u => `<div class="up src ${u.enabled===false?'off':''}">
-      <span class="dot"></span><span class="nm">${esc(u.name)}</span><span class="u">${esc(u.url)}</span>
-      ${upMeta((ST.meta || {})[u.id])}
-      <button class="sw" data-on="${u.enabled===false?0:1}" data-tip="${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','${u.id}',this)"><i></i></button>
-      <button class="ib dl" data-tip="删除" onclick="delUp('${u.id}','${esc(u.name)}')">${icon('trash')}</button>
-    </div>`).join('') || '<div class="empty">还没有订阅源</div>'
+  h += ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
   h += '</div></div>'
-  h += `<div class="card anim" style="animation-delay:.10s"><div class="ttl">节点<span class="sp"></span>
+  h += `<div class="card anim" style="animation-delay:.10s" id="nodecard">${nodeCardInner()}</div>`
+  return h + '<div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+}
+
+// 单独一份，增删订阅源后只重绘这一块，不必整页重建
+function nodeCardInner(){
+  let h = `<div class="ttl">节点<span class="sp"></span>
     <button class="g sm" onclick="foldAll(true)">展开全部</button>
     <button class="g sm" onclick="foldAll(false)">收起全部</button>
     <button class="ib" data-tip="重新拉取" onclick="refresh(this)">${icon('refresh')}</button></div>`
@@ -588,7 +641,28 @@ function viewNode(){
     h += '</div></div></div>'
   }
   if (!ST.regions.length) h += '<div class="empty">暂无节点，先添加订阅源</div>'
-  return h + '</div><div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+  return h
+}
+
+function upRow(u){
+  const snapAt = (ST.snaps || {})[u.id]
+  return `<div class="up src ${u.enabled===false?'off':''}" data-id="${u.id}">
+      <span class="dot"></span>
+      <span class="nm">${esc(u.name)}${u.auto===false?'<span class="tag manual" data-tip="不参与自动刷新，固定使用快照">手动</span>':''}</span>
+      <span class="u">${esc(u.url)}${snapAt?`<span class="snap">快照 ${ago(snapAt)}</span>`:''}</span>
+      ${upMeta((ST.meta || {})[u.id], u.id)}
+      <button class="sw" data-on="${u.enabled===false?0:1}" data-tip="${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','${u.id}',this)"><i></i></button>
+      <button class="ib" data-tip="编辑" onclick="editUp('${u.id}')">${icon('edit')}</button>
+      <button class="ib dl" data-tip="删除" onclick="delUp('${u.id}','${esc(u.name)}')">${icon('trash')}</button>
+    </div>`
+}
+function ago(ts){
+  const m = Math.floor((Date.now() - ts) / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return m + ' 分钟前'
+  const h = Math.floor(m / 60)
+  if (h < 24) return h + ' 小时前'
+  return Math.floor(h / 24) + ' 天前'
 }
 
 /* 带「全部」语义的多选：'all' 与具体白名单二选一 */
@@ -795,9 +869,12 @@ function fmtSize(b){
 }
 // 机场的流量与到期。返回三个平级元素（进度条 / 流量 / 到期），
 // 缺项用空 span 占位——列数恒定，各行才能逐列对齐。
-function upMeta(m){
+function upMeta(m, id){
   const blank = '<span></span>'
-  if (!m) return blank + blank + blank
+  // 拿不到就直说，并给一个查抓取详情的入口。
+  // 以前这里是三个空 span，一片空白，分不清是机场没给还是我们没解析出来。
+  if (!m) return blank + blank +
+    `<span class="tgt mute" data-tip="点击查看抓取详情" onclick="probeUp('${id||''}')">用量未知</span>`
   let bar = blank, traffic = blank, exp = blank
   if (m.total > 0) {
     const left = Math.max(0, m.total - m.up - m.down)
@@ -1200,17 +1277,111 @@ window.resetOwn = async () => {
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
 window.addUp = async () => {
-  const v = await modal({ title:'添加订阅源', desc:'填入机场提供的订阅链接，保存后立即拉取。', fields:[{ph:'名称，便于区分多个来源'},{ph:'https://...'}], ok:'添加' })
+  const v = await modal({ title:'添加订阅源', desc:'填入机场提供的订阅链接。保存前会先试拉一次，确认能解析出节点。', fields:[{ph:'名称，便于区分多个来源'},{ph:'https://...'}], ok:'添加' })
   if (!v) return
   const [name, url] = v
   if (!url) return toast('订阅链接不能为空', true)
-  const r = await api('/api/upstreams', {act:'add', name, url})
+  let r = await api('/api/upstreams', {act:'add', name, url})
+  // 试拉不通就问一句，而不是默默收下一个死链接
+  if (!r.ok && r.canForce) {
+    if (!await modal({ title:'这个链接拉不通', desc:r.msg + '。仍可先加进来之后再排查，但它不会贡献任何节点。', ok:'仍然添加', danger:true })) return
+    r = await api('/api/upstreams', {act:'add', name, url, force:1})
+  }
   if (!r.ok) return toast(r.msg, true)
-  toast('已添加订阅源'); ST = null; dash()
+  toast(r.up && r.up.n ? `已添加，解析到 ${r.up.n} 个节点` : '已添加订阅源')
+  await syncUp(r.up)
+}
+window.editUp = async (id) => {
+  const u = (ST.upstreams || []).find(x => x.id === id)
+  if (!u) return
+  const auto = u.auto !== false
+  const snapAt = (ST.snaps || {})[id]
+  const html = `
+    <div class="fg"><label class="lb">名称</label>
+      <input id="un" value="${esc(u.name)}" placeholder="便于区分多个来源"></div>
+    <div class="fg"><label class="lb">订阅链接</label>
+      <input id="uu" value="${esc(u.url)}" placeholder="https://...">
+      <div class="hint">改动链接会立即拉取一次并刷新快照。</div></div>
+    <div class="fg"><label class="lb">更新方式</label>
+      ${selectHTML('ua', [
+        {v:'1', label:'自动更新 — 每小时拉取最新节点'},
+        {v:'0', label:'手动 — 只用快照，不自动拉取'}
+      ], auto ? '1' : '0')}
+      <div class="hint" id="uah"></div></div>`
+  const box = await modal({ title:'编辑订阅源', html, ok:'保存', wide:true, onMount: b => {
+    bindSelect(b)
+    const sync = () => {
+      b.querySelector('#uah').innerHTML = selValue(b.querySelector('#ua')) === '1'
+        ? '常规机场用这个。链接长期有效，每小时自动拉一次。'
+        : `适合<b>有效期只有几分钟的一次性链接</b>：平时完全不请求它，固定使用快照。${snapAt?'当前快照抓于 '+ago(snapAt)+'。':'目前还没有快照，保存后会先拉一次。'}需要更新节点时，回机场复制新链接贴到上面即可。`
+    }
+    b.querySelectorAll('#ua .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
+    sync()
+  }})
+  if (!box) return
+  const name = box.querySelector('#un').value.trim()
+  const url = box.querySelector('#uu').value.trim()
+  const a = selValue(box.querySelector('#ua')) === '1'
+  if (!url) return toast('订阅链接不能为空', true)
+  let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a })
+  if (!r.ok && r.canForce) {
+    if (!await modal({ title:'新链接拉不通', desc:r.msg + '。仍可保存，但在拿到能用的链接前它不会有新节点。', ok:'仍然保存', danger:true })) return
+    r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, force:1 })
+  }
+  if (!r.ok) return toast(r.msg, true)
+  toast(r.up && r.up.n ? `已保存，抓到 ${r.up.n} 个节点` : '已保存')
+  await syncUp(null)
 }
 window.delUp = async (id, name) => {
   if (!await modal({title:'删除订阅源', desc:`「${name}」及其全部节点将从订阅中移除。`, ok:'删除', danger:true})) return
-  await api('/api/upstreams', {act:'del', id}); toast('已删除'); ST = null; dash()
+  await api('/api/upstreams', {act:'del', id})
+  const row = document.querySelector(`.uplist.src .up[data-id="${id}"]`)
+  if (row) row.remove()
+  toast('已删除'); await syncUp(null)
+}
+
+// 增删订阅源后的局部刷新：新行立刻插入，数据后台重取，
+// 只重绘受影响的两处。整页 dash() 会换骨架屏 + 重放入场动画，看着就是「闪一下」。
+async function syncUp(nu){
+  const list = document.querySelector('.uplist.src')
+  if (nu && list) {
+    const em = list.querySelector('.empty')
+    if (em) em.remove()
+    ST.upstreams.push(nu)
+    list.insertAdjacentHTML('beforeend', upRow(nu))
+  }
+  const card = document.getElementById('nodecard')
+  if (card) card.classList.add('busy')
+  PRF = null                       // 档案的机场选项依赖它
+  const r = await api('/api/state')
+  if (card) card.classList.remove('busy')
+  if (!r || !r.ok) return
+  ST = r
+  paintHeader()                    // 顶部「N 个订阅源 · M 个节点」
+  if (list) list.innerHTML = ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
+  if (card) card.innerHTML = nodeCardInner()
+}
+
+window.probeUp = async (id) => {
+  if (!id) return
+  const r = await api('/api/probe', { id })
+  if (!r.ok) return toast(r.msg || '诊断失败', true)
+  const row = (k, v) => `<div class="up" style="grid-template-columns:104px minmax(0,1fr)">
+    <span class="nm">${k}</span><span class="u" style="white-space:pre-wrap">${esc(String(v))}</span></div>`
+  let h = '<div class="uplist" style="grid-template-columns:104px minmax(0,1fr)">'
+  if (r.http === 0) {
+    h += row('结果', '请求失败：' + (r.err || '未知错误'))
+  } else {
+    h += row('HTTP', r.http) + row('响应格式', r.fmt) + row('大小', r.bytes + ' 字节') + row('解析到节点', r.nodes + ' 个')
+    h += row('Subscription-Userinfo 头', r.hasUserinfo ? r.headers['subscription-userinfo'] : '机场未返回该响应头')
+    h += row('识别到的公告行', r.notes.length ? r.notes.join('\n') : '（无）')
+    h += row('最终用量信息', r.meta
+      ? `总量 ${r.meta.total ? fmtSize(r.meta.total) : '未知'} · 已用 ${fmtSize((r.meta.up||0)+(r.meta.down||0))} · 到期 ${r.meta.expire ? new Date(r.meta.expire*1000).toLocaleDateString('zh-CN') : '未知'}`
+      : '解析不出 —— 上面两行都没有可用信息')
+    h += row('响应前几行', r.sample.join('\n'))
+  }
+  h += '</div>'
+  await modal({ title:'抓取诊断 · ' + r.name, desc:'机场到底给了什么，我们又解析出了什么。密钥字段已抹去。', html:h, ok:'知道了', noCancel:true, wide:true })
 }
 window.upAct = async (act, id, el) => {
   if (act === 'toggle' && el) {

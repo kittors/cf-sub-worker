@@ -1539,10 +1539,9 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .sel.open .selb{border-color:var(--acc);box-shadow:0 0 0 3.5px var(--accBg)}
 .sel.open .selb .ic{transform:rotate(180deg)}
 @keyframes popIn{from{opacity:0;transform:translateY(-5px) scale(.98)}to{opacity:1;transform:none}}
-/* .anim 的入场动画含 opacity/transform，fill:both 会让每张卡片长期持有自己的层叠上下文，
-   面板的 z-index 被困在卡片内部、被后面的兄弟卡片盖住。展开时给所在卡片加 .front 抬升。 */
-.card.front{position:relative;z-index:40}
 .selp{position:absolute;top:calc(100% + 5px);left:0;right:0;background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--shP);padding:5px;z-index:30;max-height:250px;overflow:auto;animation:popIn .18s var(--e) both}
+/* 打开时挪到 body 上，脱离弹窗的滚动裁剪区；位置由 JS 按触发器算 */
+.selp.portal{position:fixed;top:auto;left:auto;right:auto;z-index:120}
 .selo{padding:8px 10px;border-radius:7px;font-size:13.5px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .12s}
 .selo:hover{background:var(--hov)}
 .selo.on{color:var(--acc);font-weight:500}
@@ -1784,6 +1783,8 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
     // 双保险：animationend 正常时立即清理；若动画被系统「减少动态效果」禁用
     // 或因任何原因不触发，400ms 后强制移除，绝不让遮罩留在页面上。
     const close = v => {
+      // 展开中的下拉面板此刻挂在 body 上，bd.remove() 带不走它，会留在页面上
+      closeAllSel()
       const done = () => { bd.remove(); document.removeEventListener('keydown', onKey) }
       bd.classList.add('out')
       bd.addEventListener('animationend', done, { once: true })
@@ -1835,14 +1836,12 @@ function bindSelect(root){
       sel.dataset.v = multi ? picked.join('|') : (picked[0] || '')
       btn.innerHTML = esc(selLabel(opts, picked, multi)) + icon('down','s')
     }
+    sel._pop = pop
     btn.onclick = e => {
       e.stopPropagation()
       const open = sel.classList.contains('open')
       closeAllSel()
-      if (!open) {
-        sel.classList.add('open'); pop.hidden = false
-        sel.closest('.card')?.classList.add('front')
-      }
+      if (!open) openSel(sel, btn, pop)
     }
     pop.querySelectorAll('.selo').forEach(o => {
       o.onclick = e => {
@@ -1861,14 +1860,58 @@ function bindSelect(root){
     })
   })
 }
+// 下拉面板打开时挪到 body 上、改用 fixed 定位。
+// 弹窗内容区是 overflow:auto 的滚动容器，absolute 面板一旦超出边界就被裁掉，
+// 底部按钮区还会盖在它上面 —— 光调 z-index 救不回被裁的那半，必须脱离容器。
+function openSel(sel, btn, pop){
+  if (!pop._home) pop._home = { p: pop.parentNode, n: pop.nextSibling }
+  document.body.appendChild(pop)
+  pop.classList.add('portal')
+  pop.hidden = false
+  sel.classList.add('open')
+  placeSel(btn, pop)
+}
+function placeSel(btn, pop){
+  const r = btn.getBoundingClientRect(), gap = 5, pad = 10
+  pop.style.width = r.width + 'px'
+  pop.style.left = r.left + 'px'
+  pop.style.maxHeight = ''
+  const below = innerHeight - r.bottom - gap - pad
+  const above = r.top - gap - pad
+  const need = pop.scrollHeight
+  // 下方放不下、且上方更宽敞时朝上展开
+  if (need > below && above > below) {
+    pop.style.maxHeight = Math.min(250, above) + 'px'
+    pop.style.top = Math.max(pad, r.top - gap - Math.min(need, above, 250)) + 'px'
+  } else {
+    pop.style.maxHeight = Math.min(250, below) + 'px'
+    pop.style.top = (r.bottom + gap) + 'px'
+  }
+}
 function closeAllSel(){
   document.querySelectorAll('.sel.open').forEach(s => {
     s.classList.remove('open')
-    s.querySelector('.selp').hidden = true
-    s.closest('.card')?.classList.remove('front')
+    const pop = s._pop
+    if (!pop) return
+    pop.hidden = true
+    pop.classList.remove('portal')
+    pop.style.cssText = ''
+    // 放回原位，否则下次重绘这块 DOM 时面板会被落在 body 上
+    if (pop._home) pop._home.p.insertBefore(pop, pop._home.n)
   })
 }
 document.addEventListener('click', closeAllSel)
+// 页面或弹窗滚动后按钮就挪位了，面板得跟上；跟不上就收起，别浮在半空
+addEventListener('scroll', () => {
+  document.querySelectorAll('.sel.open').forEach(s => {
+    const btn = s.querySelector('.selb'), pop = s._pop
+    if (!btn || !pop) return
+    const r = btn.getBoundingClientRect()
+    if (r.bottom < 0 || r.top > innerHeight) return closeAllSel()
+    placeSel(btn, pop)
+  })
+}, true)
+addEventListener('resize', closeAllSel)
 
 // 顶栏常驻。整页 innerHTML 重建会让它的入场动画每次重播，表现为切 tab 时上方闪一下。
 // 这里首次渲染后只做增量更新：改统计文案、切 tab 高亮。
@@ -1926,6 +1969,7 @@ window.doLogin = async () => {
 }
 
 async function dash(skip){
+  closeAllSel()      // 面板挂在 body 上，重建页面带不走它
   if (!skip) skeleton()
   // 每个 tab 只拉自己要的，且并行发出——串行等两个请求是之前切 tab 卡顿的主因之一
   const jobs = []
