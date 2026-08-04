@@ -6,7 +6,7 @@ global.btoa = s => Buffer.from(s, 'binary').toString('base64')
 global.atob = s => Buffer.from(s, 'base64').toString('binary')
 global.TextEncoder = TextEncoder
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -565,6 +565,57 @@ sec('18. 源码不含站点信息（开源前置检查）')
   // 部署脚本不得内嵌账号信息
   ok(!/ACCOUNT="[0-9a-f]{32}"/.test(dep), '部署脚本无硬编码 Account ID')
   ok(!/\$HOME|~\/[.\w]/.test(dep), '部署脚本不引用本机私有路径')
+}
+
+
+sec('19. 分流目标多选')
+{
+  const own5 = { a:{name:'节点A',type:'vless',s:'a.example.com',p:443,u:'11111111-2222-3333-4444-555555555555',sni:'s',pk:'PK',sid:'01',net:'tcp',flow:'xtls-rprx-vision'},
+                 b:{name:'节点B',type:'hysteria2',s:'b.example.com',p:8443,u:'11111111-2222-3333-4444-555555555555',sni:'s',obfs:'salamander',opwd:'o'} }
+  const live = ['jp','hk']
+
+  // 新旧数据格式都要认
+  ok(JSON.stringify(T.targetList({target:'own:a'})) === '["own:a"]', '字符串目标兼容为单元素数组')
+  ok(JSON.stringify(T.targetList({target:['own:a','region:jp']})) === '["own:a","region:jp"]', '数组目标原样保留')
+  ok(JSON.stringify(T.targetList({})) === '["all"]', '缺省目标回落到 all')
+
+  const multi = T.resolveTargets({target:['own:a','region:jp','own:b']}, live, own5)
+  ok(JSON.stringify(multi) === '["节点A","🇯🇵 日本","节点B"]', '多目标按选择顺序解析')
+  const dup = T.resolveTargets({target:['own:a','own:a','region:xx']}, live, own5)
+  ok(dup.length === 2 && dup[0] === '节点A' && dup[1] === '🚀 节点选择', '重复与失效目标去重合并')
+  ok(JSON.stringify(T.resolveTargets({target:[]}, live, own5)) === '["🚀 节点选择"]', '空目标不产生空组')
+
+  // strict 只放选定目标，非 strict 追加兜底
+  const st = T.policyMembers({strict:true}, ['节点A','🇯🇵 日本'], ['节点A','节点B'], ['🇯🇵 日本'])
+  ok(JSON.stringify(st) === '["节点A","🇯🇵 日本"]', 'strict 模式只含选定目标')
+  const loose = T.policyMembers({strict:false}, ['节点A'], ['节点A','节点B'], ['🇯🇵 日本'])
+  ok(loose[0] === '节点A' && loose.includes('🚀 节点选择') && loose.includes('DIRECT'), '非 strict 追加兜底且目标居首')
+
+  // 生成端：多目标策略要产出多成员的组，且无悬空
+  const pol5 = [{ id:'ai', name:'AI', target:['own:a','own:b'], strict:true, enabled:true, presets:['ai'], domains:[], keywords:[], processes:[] }]
+  const d = yaml.load(T.genClash(false, up, pol5, LIB, own5, SET))
+  const g = d['proxy-groups'].find(x => x.name === 'AI')
+  ok(g && JSON.stringify(g.proxies) === '["节点A","节点B"]', 'Clash 组内含全部选定目标')
+  const valid = new Set([...d.proxies.map(x=>x.name), ...d['proxy-groups'].map(x=>x.name), 'DIRECT','REJECT'])
+  let dang = []
+  d['proxy-groups'].forEach(x => (x.proxies||[]).forEach(y => { if(!valid.has(y)) dang.push(y) }))
+  ok(dang.length === 0, '多目标不产生悬空引用')
+
+  const sb = JSON.parse(T.genSB(up, pol5, LIB, own5, SET))
+  const gs = sb.outbounds.find(o => o.tag === 'AI')
+  ok(gs && gs.outbounds.length === 2, 'sing-box 组内同样含全部目标')
+  const tags = new Set(sb.outbounds.map(o => o.tag))
+  ok(gs.outbounds.every(t => tags.has(t)), 'sing-box 多目标引用完整')
+
+  // UI
+  const ui = T.adminHTML(true, true)
+  ok(ui.includes('function selValue'), '存在多选取值函数')
+  ok(/multi\s*\?\s*picked\.join/.test(ui) || ui.includes("multi ? picked.join('|')"), '多选值序列化')
+  ok(ui.includes('return          // 多选时保持展开'), '多选时面板不自动收起')
+  ok(ui.includes("if (!pop.querySelector('.selo.on')) o.classList.add('on')"), '至少保留一个选中项')
+  ok(ui.includes('class="tgts"'), '策略行支持展示多个目标')
+  ok(!/\.pol\.drag \*\{visibility:hidden\}/.test(ui), '拖拽行不再抹掉内容')
+  ok(/\.pol\.drag\{[^}]*opacity/.test(ui), '拖拽行改为淡化处理')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -716,7 +716,9 @@ async function apiRoute(req, url, event) {
       const clean = b.policies.map(x => ({
         id: String(x.id || randHex(4)).slice(0, 24),
         name: String(x.name || '未命名').slice(0, 24),
-        target: String(x.target || 'all'),
+        target: Array.isArray(x.target)
+          ? [...new Set(x.target.map(String).filter(Boolean))].slice(0, 20)
+          : String(x.target || 'all'),
         strict: !!x.strict,
         enabled: x.enabled !== false,
         presets: (x.presets || []).filter(k => typeof k === 'string').slice(0, 40),
@@ -919,11 +921,29 @@ function resolveTarget(t, liveKeys, own) {
   return '🚀 节点选择'
 }
 
-// 策略组内的候选项。strict 只放目标本身：目标挂了就断，不静默回落到别的地区。
-function policyMembers(p, target, allN, regionNames) {
-  if (p.strict) return [target]
-  const out = [target]
+// 策略的分流目标可以是一个或多个。历史数据是字符串，新数据是数组，两种都认。
+function targetList(p) {
+  const t = p.target
+  if (Array.isArray(t)) return t.filter(Boolean)
+  return t ? [t] : ['all']
+}
+
+// 解析成客户端里真实存在的名字，去重后保持选择顺序
+function resolveTargets(p, liveKeys, own) {
+  const out = []
+  for (const t of targetList(p)) {
+    const r = resolveTarget(t, liveKeys, own)
+    if (r && !out.includes(r)) out.push(r)
+  }
+  return out.length ? out : ['🚀 节点选择']
+}
+
+// 策略组内的候选项。strict 只放选定的目标：目标全挂就断，不静默回落到别的地区。
+function policyMembers(p, targets, allN, regionNames) {
+  const out = []
   const add = x => { if (x && !out.includes(x)) out.push(x) }
+  ;(Array.isArray(targets) ? targets : [targets]).forEach(add)
+  if (p.strict) return out
   add('🚀 节点选择'); add('DIRECT')
   regionNames.forEach(add); allN.forEach(add)
   return out
@@ -990,7 +1010,7 @@ function genClash(blacklist, up, policies, lib, own, st) {
 
   // 策略组 —— 每条启用的策略一个 select 组
   const polGroups = act.map(p => {
-    const t = resolveTarget(p.target, liveKeys, own)
+    const t = resolveTargets(p, liveKeys, own)
     return [
       `  - name: "${p.name}"`,
       `    type: select`,
@@ -1177,7 +1197,7 @@ function genSB(up, policies, lib, own, st) {
 
   // 策略组
   act.forEach(p => {
-    const t = resolveTarget(p.target, liveKeys, own)
+    const t = resolveTargets(p, liveKeys, own)
     outbounds.push({
       type: 'selector', tag: p.name,
       outbounds: policyMembers(p, t, allN, regionNames).map(mapTag)
@@ -1380,6 +1400,8 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .selo{padding:8px 10px;border-radius:7px;font-size:13.5px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .12s}
 .selo:hover{background:var(--hov)}
 .selo.on{color:var(--acc);font-weight:500}
+.sel.multi .selo.on{background:var(--accBg)}
+.sel.multi .selp{padding-bottom:5px}
 .selo .ic{opacity:0}
 .selo.on .ic{opacity:1}
 
@@ -1393,9 +1415,12 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 /* 策略行 */
 .pol{display:flex;gap:11px;align-items:center;padding:11px 12px;border:1px solid var(--bd2);border-radius:11px;margin-bottom:7px;background:var(--card);transition:border-color .16s var(--e),background .16s var(--e),opacity .16s,box-shadow .16s var(--e)}
 .pol:hover{border-color:var(--bd);background:var(--hov)}
-.pol.drag{opacity:.32;background:var(--hov);border-style:dashed}
-.pol.drag *{visibility:hidden}
-.pol.drag .grip{visibility:visible;color:var(--acc)}
+/* 拖拽中：内容保持可见，只淡化微缩。早先用 visibility:hidden 抹掉内容，
+   行高还占着，看起来像列表中间破了个洞。 */
+.pol.drag{opacity:.38;transform:scale(.985);background:var(--hov);border-color:var(--accBd)}
+.pol.drag .grip{color:var(--acc)}
+.pol{cursor:default}
+.pol[draggable="true"]{cursor:grabbing}
 .pol.off{opacity:.5}
 .grip{color:var(--tx3);cursor:grab;display:flex;padding:2px}
 .grip:active{cursor:grabbing}
@@ -1405,6 +1430,7 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .tgt{font-size:12px;color:var(--tx2);background:var(--bg);border:1px solid var(--bd2);padding:2.5px 8px;border-radius:6px;white-space:nowrap}
 .tgt.strict{background:var(--accBg);border-color:var(--accBd);color:var(--acc)}
 .tgt.gone{background:var(--warnBg);border-color:var(--warnBd);color:var(--warn);text-decoration:line-through}
+.tgts{display:flex;gap:4px;flex-wrap:wrap;min-width:0}
 
 .sw{width:34px;height:20px;border-radius:11px;background:var(--bd);border:none;padding:0;position:relative;flex-shrink:0;transition:background .22s var(--e)}
 .sw:hover{background:var(--tx3)}
@@ -1608,18 +1634,38 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
   })
 }
 
-/* 自定义下拉，替代原生 select */
-function selectHTML(id, opts, val){
-  const cur = opts.find(o => o.v === val) || opts[0]
-  return \`<div class="sel" id="\${id}" data-v="\${esc(cur.v)}">
-    <button type="button" class="g selb">\${esc(cur.label)}\${icon('down','s')}</button>
+/* 自定义下拉，替代原生 select。multi=true 时可多选，面板不自动收起。 */
+function selectHTML(id, opts, val, multi){
+  const picked = multi ? (Array.isArray(val) ? val : [val]).filter(Boolean) : [val]
+  const has = v => picked.includes(v)
+  const first = opts.find(o => has(o.v)) || opts[0]
+  return \`<div class="sel \${multi?'multi':''}" id="\${id}" data-v="\${esc(multi ? picked.join('|') : (first||{}).v || '')}">
+    <button type="button" class="g selb">\${esc(selLabel(opts, picked, multi))}\${icon('down','s')}</button>
     <div class="selp" hidden>\${opts.map(o =>
-      \`<div class="selo \${o.v===cur.v?'on':''}" data-v="\${esc(o.v)}">\${icon('check','s')}<span>\${esc(o.label)}</span></div>\`).join('')}</div>
+      \`<div class="selo \${has(o.v)?'on':''}" data-v="\${esc(o.v)}">\${icon('check','s')}<span>\${esc(o.label)}</span></div>\`).join('')}</div>
   </div>\`
+}
+function selLabel(opts, picked, multi){
+  const names = picked.map(v => (opts.find(o => o.v === v) || {}).label).filter(Boolean)
+  if (!names.length) return multi ? '未选择' : (opts[0] || {}).label || ''
+  if (!multi || names.length === 1) return names[0]
+  return names.length <= 2 ? names.join('、') : \`\${names[0]} 等 \${names.length} 项\`
+}
+// 读取当前值：单选得字符串，多选得数组
+function selValue(sel){
+  if (!sel.classList.contains('multi')) return sel.dataset.v
+  return [...sel.querySelectorAll('.selo.on')].map(o => o.dataset.v)
 }
 function bindSelect(root){
   root.querySelectorAll('.sel').forEach(sel => {
     const btn = sel.querySelector('.selb'), pop = sel.querySelector('.selp')
+    const multi = sel.classList.contains('multi')
+    const opts = [...pop.querySelectorAll('.selo')].map(o => ({ v: o.dataset.v, label: o.querySelector('span').textContent }))
+    const repaint = () => {
+      const picked = [...pop.querySelectorAll('.selo.on')].map(o => o.dataset.v)
+      sel.dataset.v = multi ? picked.join('|') : (picked[0] || '')
+      btn.innerHTML = esc(selLabel(opts, picked, multi)) + icon('down','s')
+    }
     btn.onclick = e => {
       e.stopPropagation()
       const open = sel.classList.contains('open')
@@ -1632,9 +1678,15 @@ function bindSelect(root){
     pop.querySelectorAll('.selo').forEach(o => {
       o.onclick = e => {
         e.stopPropagation()
-        sel.dataset.v = o.dataset.v
-        btn.innerHTML = esc(o.querySelector('span').textContent) + icon('down','s')
+        if (multi) {
+          o.classList.toggle('on')
+          // 一个都不选没有意义，至少留一个
+          if (!pop.querySelector('.selo.on')) o.classList.add('on')
+          repaint()
+          return          // 多选时保持展开，方便连续勾选
+        }
         pop.querySelectorAll('.selo').forEach(x => x.classList.toggle('on', x === o))
+        repaint()
         closeAllSel()
       }
     })
@@ -1990,7 +2042,7 @@ window.editProf = async (i) => {
     name: box.querySelector('#sn').value.trim(),
     token: box.querySelector('#stk').value.trim(),
     enabled: x.enabled !== false,
-    mode: box.querySelector('#smd').dataset.v,
+    mode: selValue(box.querySelector('#smd')),
     own: chipsValue(box.querySelector('#so')), ups: chipsValue(box.querySelector('#su')),
     regions: chipsValue(box.querySelector('#sr')),
     pols: box.querySelector('#sp') ? chipsValue(box.querySelector('#sp')) : (x.pols || 'all'),
@@ -2056,7 +2108,8 @@ function viewPol(){
   // 目标失效时 resolveTarget 会静默回退到「节点选择」，出口可能悄悄变成别的地区。
   // 这种降级比直接报错更难察觉，必须在界面上点出来。
   const known = new Set((POL.targets || []).map(t => t.v))
-  const broken = ps.filter(p => p.enabled !== false && p.target && !known.has(p.target))
+  const polTargets = p => Array.isArray(p.target) ? (p.target.length ? p.target : ['all']) : [p.target || 'all']
+  const broken = ps.filter(p => p.enabled !== false && polTargets(p).some(t => !known.has(t)))
   const cur = pfs.find(x => x.id === PF)
   const inherit = POL.inherit !== false
   const scopeOpts = [{v:'',label:'全局默认（新订阅的模板）'}, ...pfs.map(x => ({v:x.id, label:x.name + (x.own ? '（专属）' : '（继承）')}))]
@@ -2089,9 +2142,9 @@ function viewPol(){
       <span class="grip">\${icon('grip','s')}</span>
       <span class="nm">\${esc(p.name)}</span>
       <span class="arrow">→</span>
-      <span class="tgt \${p.strict?'strict':''} \${known.has(p.target)?'':'gone'}" \${
-        known.has(p.target) ? (p.strict?'data-tip="严格模式：目标不可用即失败，不回落"':'')
-                            : 'data-tip="目标已不存在，实际走节点选择"'}>\${esc(tgtLabel(p.target))}</span>
+      <span class="tgts">\${polTargets(p).map(t => \`<span class="tgt \${p.strict?'strict':''} \${known.has(t)?'':'gone'}" \${
+        known.has(t) ? (p.strict?'data-tip="严格模式：目标不可用即失败，不回落"':'')
+                     : 'data-tip="目标已不存在，实际走节点选择"'}>\${esc(tgtLabel(t))}</span>\`).join('')}</span>
       <span class="meta">\${(p.presets||[]).length ? (p.presets||[]).map(k => (POL.lib[k]||{}).name || k).join(' · ') + ' · ' : ''}\${polCount(p)} 条域名\${(p.keywords||[]).length?' · '+p.keywords.length+' 关键词':''}\${(p.processes||[]).length?' · '+p.processes.length+' 进程':''}</span>
       <button class="sw" data-on="\${p.enabled===false?0:1}" data-tip="\${p.enabled===false?'启用':'停用'}" onclick="togglePol(\${i})"><i></i></button>
       <button class="ib" data-tip="编辑" onclick="editPol(\${i})">\${icon('edit')}</button>
@@ -2265,8 +2318,8 @@ window.editPol = async (i) => {
     <div class="fg"><label class="lb">策略名称</label>
       <input id="pn" value="\${esc(p.name)}" placeholder="如 🎬 流媒体"></div>
     <div class="fg"><label class="lb">分流目标</label>
-      \${selectHTML('pt', POL.targets, p.target)}
-      <div class="hint">命中该策略的流量走这个出口。</div></div>
+      \${selectHTML('pt', POL.targets, Array.isArray(p.target) ? p.target : [p.target || 'all'], true)}
+      <div class="hint">可多选。选中的会按顺序放进该策略的节点组，客户端里可自行切换；第一个为默认。</div></div>
     <div class="fg"><label class="lb">严格模式</label>
       <div class="row"><button class="sw" id="ps" data-on="\${p.strict?1:0}"><i></i></button>
         <span class="hint" style="margin:0">开启后组内只有目标本身，目标不可用即断流，不会静默回落到其它地区。</span></div></div>
@@ -2290,7 +2343,7 @@ window.editPol = async (i) => {
   if (!name) return toast('策略名称不能为空', true)
   const np = {
     id: p.id || 'p' + Math.abs([...name].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)).toString(36),
-    name, target: box.querySelector('#pt').dataset.v,
+    name, target: selValue(box.querySelector('#pt')),
     strict: box.querySelector('#ps').dataset.on === '1',
     enabled: p.enabled !== false,
     presets: [...box.querySelectorAll('#pc .chip.on')].map(c => c.dataset.k),
@@ -2390,13 +2443,13 @@ window.editOwn = async (key) => {
 
   const k = (key || box.querySelector('#ok').value.trim()).replace(/[^\w-]/g,'')
   if (!k) return toast('节点标识不能为空', true)
-  const t = box.querySelector('#ot').dataset.v
+  const t = selValue(box.querySelector('#ot'))
   const np = { name: box.querySelector('#on').value.trim(), type: t,
     s: box.querySelector('#os').value.trim(), p: box.querySelector('#op').value.trim(),
     u: box.querySelector('#ou').value.trim(), sni: box.querySelector('#osni').value.trim() }
   if (t === 'vless') {
     np.pk = box.querySelector('#opk').value.trim(); np.sid = box.querySelector('#osid').value.trim()
-    np.net = box.querySelector('#onet').dataset.v
+    np.net = selValue(box.querySelector('#onet'))
     np.flow = np.net === 'tcp' ? 'xtls-rprx-vision' : ''
   } else {
     np.ports = box.querySelector('#oports').value.trim()
