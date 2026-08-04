@@ -1404,6 +1404,7 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 .arrow{color:var(--tx3);font-size:12px}
 .tgt{font-size:12px;color:var(--tx2);background:var(--bg);border:1px solid var(--bd2);padding:2.5px 8px;border-radius:6px;white-space:nowrap}
 .tgt.strict{background:var(--accBg);border-color:var(--accBd);color:var(--acc)}
+.tgt.gone{background:var(--warnBg);border-color:var(--warnBd);color:var(--warn);text-decoration:line-through}
 
 .sw{width:34px;height:20px;border-radius:11px;background:var(--bd);border:none;padding:0;position:relative;flex-shrink:0;transition:background .22s var(--e)}
 .sw:hover{background:var(--tx3)}
@@ -2052,6 +2053,10 @@ function tgtLabel(v){
 function viewPol(){
   const ps = POL.policies || []
   const pfs = POL.profiles || []
+  // 目标失效时 resolveTarget 会静默回退到「节点选择」，出口可能悄悄变成别的地区。
+  // 这种降级比直接报错更难察觉，必须在界面上点出来。
+  const known = new Set((POL.targets || []).map(t => t.v))
+  const broken = ps.filter(p => p.enabled !== false && p.target && !known.has(p.target))
   const cur = pfs.find(x => x.id === PF)
   const inherit = POL.inherit !== false
   const scopeOpts = [{v:'',label:'全局默认（新订阅的模板）'}, ...pfs.map(x => ({v:x.id, label:x.name + (x.own ? '（专属）' : '（继承）')}))]
@@ -2076,12 +2081,17 @@ function viewPol(){
       <button class="g sm" data-tip="恢复默认" onclick="resetPol()">\${icon('undo','s')}恢复默认</button>
       <button class="sm" onclick="editPol(null)">\${icon('plus','s')}新建</button></div>
     <div class="hint" style="margin:-6px 0 13px">拖动左侧手柄调整顺序 —— 顺序即匹配优先级，靠上的先命中。规则命中后不再往下匹配，所以更具体的策略要放在更宽泛的前面。</div>
+    \${broken.length ? \`<div class="alert" style="margin:-4px 0 13px">\${icon('warn','s')}
+      <span>\${broken.map(p => esc(p.name)).join('、')} 指向的节点已不存在，当前被降级为「🚀 节点选择」——
+      出口可能不是你预期的地区。请编辑这些策略重新指定目标。</span></div>\` : ''}
     <div id="pollist">\`
   h += ps.map((p, i) => \`<div class="pol \${p.enabled===false?'off':''}" draggable="true" data-i="\${i}">
       <span class="grip">\${icon('grip','s')}</span>
       <span class="nm">\${esc(p.name)}</span>
       <span class="arrow">→</span>
-      <span class="tgt \${p.strict?'strict':''}" \${p.strict?'data-tip="严格模式：目标不可用即失败，不回落"':''}>\${esc(tgtLabel(p.target))}</span>
+      <span class="tgt \${p.strict?'strict':''} \${known.has(p.target)?'':'gone'}" \${
+        known.has(p.target) ? (p.strict?'data-tip="严格模式：目标不可用即失败，不回落"':'')
+                            : 'data-tip="目标已不存在，实际走节点选择"'}>\${esc(tgtLabel(p.target))}</span>
       <span class="meta">\${(p.presets||[]).length ? (p.presets||[]).map(k => (POL.lib[k]||{}).name || k).join(' · ') + ' · ' : ''}\${polCount(p)} 条域名\${(p.keywords||[]).length?' · '+p.keywords.length+' 关键词':''}\${(p.processes||[]).length?' · '+p.processes.length+' 进程':''}</span>
       <button class="sw" data-on="\${p.enabled===false?0:1}" data-tip="\${p.enabled===false?'启用':'停用'}" onclick="togglePol(\${i})"><i></i></button>
       <button class="ib" data-tip="编辑" onclick="editPol(\${i})">\${icon('edit')}</button>

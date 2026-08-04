@@ -519,7 +519,13 @@ sec('17. 管理端 JS 可执行性')
   // 模板里的换行转义必须是 \\n，写成 \n 会被提前解析掉
   const src = fs.readFileSync(path.join(__dirname, '..', 'worker.js'), 'utf8')
   const uiStart = src.indexOf('function adminHTML')
+  const uiSrc = src.slice(uiStart)
   const bad = src.slice(uiStart).split('\n').filter(l => /\.(split|join)\('\\n'\)/.test(l) && !/\\\\n/.test(l))
+  // 目标失效必须在界面上告警，不能任由 resolveTarget 静默降级
+  ok(uiSrc.includes('const broken = ps.filter'), '检出指向失效节点的策略')
+  ok(uiSrc.includes('指向的节点已不存在'), '失效目标有醒目告警')
+  ok(/\.tgt\.gone\{/.test(uiSrc), '失效目标在行内有视觉标记')
+
   ok(bad.length === 0, '模板内换行转义正确' + (bad.length ? `：${bad[0].trim().slice(0, 60)}` : ''))
 }
 
