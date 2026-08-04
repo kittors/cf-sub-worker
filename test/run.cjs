@@ -693,5 +693,95 @@ sec('21. 订阅源增删的交互契约')
   ok(wsrc.includes('name|remarks|title|flag'), '未填名称时从链接参数取名')
 }
 
+// loadNodes 要碰 KV 和网络，单独造一份带假 CONF / 假 fetch 的 worker 实例来跑
+function sandbox(){
+  const KV = new Map(), st = { ok: true, calls: [] }
+  const CONF = {
+    get: async (k, t) => { if (!KV.has(k)) return null; const v = KV.get(k); return t === 'json' ? JSON.parse(v) : v },
+    put: async (k, v) => { KV.set(k, v) },
+    delete: async k => { KV.delete(k) },
+  }
+  const fk = async (u) => {
+    st.calls.push(u)
+    if (!st.ok) return { ok: false, status: 403, headers: { get: () => null }, text: async () => '403' }
+    return { ok: true, status: 200,
+      headers: { get: k => k.toLowerCase() === 'subscription-userinfo'
+        ? 'upload=0; download=1073741824; total=10737418240; expire=1790000000' : null },
+      text: async () => [
+        '  - {name: "日本-1", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}',
+        '  - {name: "日本-2", type: ss, server: 1.2.3.5, port: 443, cipher: aes-128-gcm, password: x}',
+      ].join('\n') }
+  }
+  const wsrc = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  const mk = new Function('CONF','fetch','addEventListener','crypto','btoa','atob','TextEncoder','TextDecoder',
+    wsrc + '\n;return {loadNodes, saveSnap, fetchUpstream, kvPut}')
+  const api = mk(CONF, fk, () => {}, require('crypto').webcrypto,
+    x => Buffer.from(x, 'binary').toString('base64'), x => Buffer.from(x, 'base64').toString('binary'),
+    TextEncoder, TextDecoder)
+  return { api, KV, st }
+}
+
+;(async () => {
+
+sec('22. 一次性订阅链接：快照机制')
+{
+  // 有的机场发的是几分钟就失效的一次性链接。按「链接长期有效」的前提
+  // 每小时去拉，除了第一次全是 403 —— 节点会整批消失。
+  const UP = { id:'m1', name:'一次性', url:'https://ex.example.com/get?token=abc', enabled:true }
+
+  const A = sandbox()
+  await A.api.kvPut('upstreams', [UP])
+  const probe = await A.api.fetchUpstream(UP)
+  ok(probe.nodes.length === 2, '链接有效时正常抓到节点')
+  await A.api.saveSnap('m1', probe, null)
+  ok(A.KV.has('snap:m1'), '成功拉取后写入快照')
+
+  // 链接失效但没关自动更新：不能让已经在用的节点凭空消失
+  A.st.ok = false; A.KV.delete('cache:nodes'); A.st.calls = []
+  let d = await A.api.loadNodes(true, null)
+  ok(d.nodes.length === 2, '拉取失败时沿用快照，节点不清零')
+  ok(d.errors.length === 1 && /沿用快照/.test(d.errors[0].msg), '错误信息注明已沿用快照')
+  ok(!!d.snaps['m1'], 'snaps 标出哪些源用的是快照')
+
+  // 关掉自动更新：一次性链接平时根本不该被请求
+  const B = sandbox()
+  await B.api.kvPut('upstreams', [{ ...UP, auto:false }])
+  const p2 = await B.api.fetchUpstream(UP)
+  await B.api.saveSnap('m1', p2, null)
+  B.KV.delete('cache:nodes'); B.st.calls = []; B.st.ok = false
+  d = await B.api.loadNodes(true, null)
+  ok(B.st.calls.length === 0, 'auto=false 时完全不发请求')
+  ok(d.nodes.length === 2, '节点全部由快照供给')
+  ok(d.errors.length === 0, '不再产生 403 错误噪音')
+  ok(!!d.meta['m1'], '用量信息也从快照恢复')
+
+  // 但没有快照时不能干等着，否则这个源永远是空的
+  const C = sandbox()
+  await C.api.kvPut('upstreams', [{ ...UP, auto:false }])
+  C.st.calls = []
+  d = await C.api.loadNodes(true, null)
+  ok(C.st.calls.length === 1, '没有快照时仍会拉一次')
+  ok(d.nodes.length === 2 && C.KV.has('snap:m1'), '首拉成功并补上快照')
+}
+
+sec('23. 订阅源可编辑')
+{
+  const ui = T.adminHTML(true, true)
+  ok(ui.includes('window.editUp'), '存在编辑入口')
+  ok(ui.includes('更新方式'), '编辑弹窗可选自动/手动')
+  ok(ui.includes('一次性链接'), '手动模式说明写清适用场景')
+  ok(ui.includes("act:'edit'") || ui.includes('act: \'edit\''), '走 edit 接口')
+  ok(ui.includes('快照 '), '行内显示快照时间')
+  ok(ui.includes('function ago'), '存在相对时间函数')
+  ok(/\.tag\.manual/.test(ui), '手动标记有独立样式')
+  // 加了编辑按钮，网格列数必须跟着加，否则整行错位
+  const cols = (ui.match(/\.uplist\.src\{grid-template-columns:([^}]+)\}/) || [])[1] || ''
+  ok(cols.trim().split(/\s+/).length === 9, `订阅源行 9 列（实际 ${cols.trim().split(/\s+/).length}）`)
+  const wsrc2 = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
+  ok(wsrc2.includes("CONF.delete('snap:'"), '删除订阅源时清理其快照')
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
+
+})()

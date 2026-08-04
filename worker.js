@@ -486,7 +486,16 @@ async function fetchUpstream(u) {
   return { nodes: out, info: mergeMeta(head, parseNotes(notes)) }
 }
 
-// 拉全部启用的机场，写缓存；失败退回 stale
+// 每个源单独留一份最后成功拉取的快照。
+// 两个用处：一次性链接（有效期几分钟的那种）平时就靠它供节点；
+// 普通源临时抽风时也用它兜底，不至于节点凭空消失。
+async function saveSnap(id, r, event) {
+  if (!hasKV) return
+  const p = CONF.put('snap:' + id, JSON.stringify({ at: Date.now(), nodes: r.nodes, info: r.info }))
+  if (event && event.waitUntil) event.waitUntil(p); else await p
+}
+
+// 拉全部启用的机场，写缓存；失败退回快照或 stale
 async function loadNodes(force, event) {
   const cached = await kvGet('cache:nodes', null)
   if (!force && cached && Date.now() - cached.at < FRESH_TTL * 1000) return cached
@@ -494,15 +503,31 @@ async function loadNodes(force, event) {
   const ups = (await kvGet('upstreams', [])).filter(u => u.enabled !== false)
   if (!ups.length) return { at: Date.now(), nodes: [], errors: [] }
 
-  const nodes = [], errors = [], meta = {}
+  const nodes = [], errors = [], meta = {}, snaps = {}
+  const useSnap = async (u, why) => {
+    const s = await kvGet('snap:' + u.id, null)
+    if (!s || !s.nodes || !s.nodes.length) return false
+    nodes.push(...s.nodes)
+    if (s.info) meta[u.id] = s.info
+    snaps[u.id] = s.at
+    if (why) errors.push({ up: u.name, msg: why + ' — 已沿用快照' })
+    return true
+  }
+
   for (const u of ups) {
+    // 一次性链接反复拉必然失败，平时根本不该去请求它
+    if (u.auto === false) {
+      if (await useSnap(u, '')) continue
+      // 还没有快照就仍拉一次，否则这个源永远是空的
+    }
     try {
       const r = await fetchUpstream(u)
-      if (!r.nodes.length) errors.push({ up: u.name, msg: '解析结果为空' })
+      if (!r.nodes.length) { errors.push({ up: u.name, msg: '解析结果为空' }); continue }
       nodes.push(...r.nodes)
       if (r.info) meta[u.id] = r.info
+      await saveSnap(u.id, r, event)
     } catch (e) {
-      errors.push({ up: u.name, msg: String(e.message || e) })
+      if (!await useSnap(u, String(e.message || e))) errors.push({ up: u.name, msg: String(e.message || e) })
     }
   }
 
@@ -511,7 +536,7 @@ async function loadNodes(force, event) {
     return { ...cached, errors, stale: true }
   }
 
-  const data = { at: Date.now(), nodes, errors, meta }
+  const data = { at: Date.now(), nodes, errors, meta, snaps }
   if (hasKV) {
     const put = CONF.put('cache:nodes', JSON.stringify(data), { expirationTtl: STALE_TTL })
     if (event && event.waitUntil) event.waitUntil(put); else await put
@@ -667,7 +692,7 @@ async function apiRoute(req, url, event) {
     }
     return json({
       ok: true, upstreams: ups, at: d.at, stale: !!d.stale, errors: d.errors || [],
-      meta: d.meta || {}, bySrc,
+      meta: d.meta || {}, bySrc, snaps: d.snaps || {},
       regions: REGIONS.filter(r => byRegion[r.key]).map(r => ({
         key: r.key, flag: r.flag, cn: r.cn,
         nodes: byRegion[r.key].map(n => ({ key: n.key, name: n.name, auto: n.auto, raw: n.raw, upName: n.upName, custom: n.custom, off: n.off }))
@@ -704,14 +729,39 @@ async function apiRoute(req, url, event) {
         if (err) return json({ ok: false, msg: '拉取失败：' + err, canForce: true }, 400)
         if (!probe.nodes.length) return json({ ok: false, msg: '链接能访问，但没解析出任何节点', canForce: true }, 400)
         addedN = probe.nodes.length   // 只回给前端做提示，不落库
+        // 立刻存快照：一次性链接就指望这一下，过几分钟再拉就是 403 了
+        await saveSnap(added.id, probe, event)
       }
       ups.push(added)
     } else if (body.act === 'del') {
       const i = ups.findIndex(u => u.id === body.id)
-      if (i >= 0) ups.splice(i, 1)
+      if (i >= 0) {
+        ups.splice(i, 1)
+        if (hasKV) await CONF.delete('snap:' + body.id)   // 快照跟着源一起走
+      }
     } else if (body.act === 'toggle') {
       const u = ups.find(u => u.id === body.id)
       if (u) u.enabled = !u.enabled
+    } else if (body.act === 'edit') {
+      const u = ups.find(x => x.id === body.id)
+      if (!u) return json({ ok: false, msg: '订阅源不存在' }, 404)
+      if (body.name !== undefined) u.name = String(body.name).trim().slice(0, 30) || u.name
+      if (body.auto !== undefined) u.auto = !!body.auto
+      if (body.url && body.url !== u.url) {
+        if (!/^https?:\/\//.test(body.url)) return json({ ok: false, msg: '链接需以 http(s):// 开头' }, 400)
+        // 换链接就立刻拉一次并刷新快照。一次性链接的整个使用方式就是
+        // 「去机场复制新链接 → 贴进来 → 趁有效期内抓一份快照」。
+        let probe = null, err = ''
+        try { probe = await fetchUpstream({ ...u, url: body.url }) }
+        catch (e) { err = String(e && e.message || e) }
+        if (!body.force) {
+          if (err) return json({ ok: false, msg: '新链接拉取失败：' + err, canForce: true }, 400)
+          if (!probe.nodes.length) return json({ ok: false, msg: '新链接没解析出任何节点', canForce: true }, 400)
+        }
+        u.url = body.url
+        if (probe && probe.nodes.length) { await saveSnap(u.id, probe, event); addedN = probe.nodes.length }
+      }
+      added = u
     } else return json({ ok: false, msg: '未知操作' }, 400)
 
     await kvPut('upstreams', ups)
@@ -1560,7 +1610,7 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
    subgrid 让每行沿用父容器的列轨道，多行才真正逐列对齐。 */
 .uplist{display:grid;gap:7px}
 .uplist.own{grid-template-columns:auto auto auto minmax(0,1fr) auto auto}
-.uplist.src{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto auto}
+.uplist.src{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto auto auto}
 .uplist.lib{grid-template-columns:auto minmax(0,1fr) auto auto}
 .up{grid-column:1/-1;display:grid;grid-template-columns:subgrid;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--bd2);border-radius:10px;transition:border-color .16s var(--e),background .16s var(--e)}
 .up:hover{border-color:var(--bd);background:var(--hov)}
@@ -1568,6 +1618,9 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 .up .u{color:var(--tx3);font:11.5px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .up.src .tgt{font-variant-numeric:tabular-nums;white-space:nowrap;justify-self:end}
 .up.src .tgt.hot{background:var(--warnBg);border-color:var(--warnBd);color:var(--warn)}
+/* 「手动」是状态说明不是强调，用中性色，跟 accent 色的「自定义」标签区分开 */
+.tag.manual{background:var(--bg);color:var(--tx2);border-color:var(--bd2)}
+.up.src .snap{margin-left:9px;color:var(--tx3);font-size:11.5px}
 /* 用量拿不到时的占位，点进去看抓取诊断 */
 .up.src .tgt.mute{color:var(--tx3);border-style:dashed;cursor:pointer;transition:color .15s,border-color .15s}
 .up.src .tgt.mute:hover{color:var(--acc);border-color:var(--accBd)}
@@ -1992,12 +2045,24 @@ function nodeCardInner(){
 }
 
 function upRow(u){
+  const snapAt = (ST.snaps || {})[u.id]
   return \`<div class="up src \${u.enabled===false?'off':''}" data-id="\${u.id}">
-      <span class="dot"></span><span class="nm">\${esc(u.name)}</span><span class="u">\${esc(u.url)}</span>
+      <span class="dot"></span>
+      <span class="nm">\${esc(u.name)}\${u.auto===false?'<span class="tag manual" data-tip="不参与自动刷新，固定使用快照">手动</span>':''}</span>
+      <span class="u">\${esc(u.url)}\${snapAt?\`<span class="snap">快照 \${ago(snapAt)}</span>\`:''}</span>
       \${upMeta((ST.meta || {})[u.id], u.id)}
       <button class="sw" data-on="\${u.enabled===false?0:1}" data-tip="\${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','\${u.id}',this)"><i></i></button>
+      <button class="ib" data-tip="编辑" onclick="editUp('\${u.id}')">\${icon('edit')}</button>
       <button class="ib dl" data-tip="删除" onclick="delUp('\${u.id}','\${esc(u.name)}')">\${icon('trash')}</button>
     </div>\`
+}
+function ago(ts){
+  const m = Math.floor((Date.now() - ts) / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return m + ' 分钟前'
+  const h = Math.floor(m / 60)
+  if (h < 24) return h + ' 小时前'
+  return Math.floor(h / 24) + ' 天前'
 }
 
 /* 带「全部」语义的多选：'all' 与具体白名单二选一 */
@@ -2625,6 +2690,47 @@ window.addUp = async () => {
   if (!r.ok) return toast(r.msg, true)
   toast(r.up && r.up.n ? \`已添加，解析到 \${r.up.n} 个节点\` : '已添加订阅源')
   await syncUp(r.up)
+}
+window.editUp = async (id) => {
+  const u = (ST.upstreams || []).find(x => x.id === id)
+  if (!u) return
+  const auto = u.auto !== false
+  const snapAt = (ST.snaps || {})[id]
+  const html = \`
+    <div class="fg"><label class="lb">名称</label>
+      <input id="un" value="\${esc(u.name)}" placeholder="便于区分多个来源"></div>
+    <div class="fg"><label class="lb">订阅链接</label>
+      <input id="uu" value="\${esc(u.url)}" placeholder="https://...">
+      <div class="hint">改动链接会立即拉取一次并刷新快照。</div></div>
+    <div class="fg"><label class="lb">更新方式</label>
+      \${selectHTML('ua', [
+        {v:'1', label:'自动更新 — 每小时拉取最新节点'},
+        {v:'0', label:'手动 — 只用快照，不自动拉取'}
+      ], auto ? '1' : '0')}
+      <div class="hint" id="uah"></div></div>\`
+  const box = await modal({ title:'编辑订阅源', html, ok:'保存', wide:true, onMount: b => {
+    bindSelect(b)
+    const sync = () => {
+      b.querySelector('#uah').innerHTML = selValue(b.querySelector('#ua')) === '1'
+        ? '常规机场用这个。链接长期有效，每小时自动拉一次。'
+        : \`适合<b>有效期只有几分钟的一次性链接</b>：平时完全不请求它，固定使用快照。\${snapAt?'当前快照抓于 '+ago(snapAt)+'。':'目前还没有快照，保存后会先拉一次。'}需要更新节点时，回机场复制新链接贴到上面即可。\`
+    }
+    b.querySelectorAll('#ua .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
+    sync()
+  }})
+  if (!box) return
+  const name = box.querySelector('#un').value.trim()
+  const url = box.querySelector('#uu').value.trim()
+  const a = selValue(box.querySelector('#ua')) === '1'
+  if (!url) return toast('订阅链接不能为空', true)
+  let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a })
+  if (!r.ok && r.canForce) {
+    if (!await modal({ title:'新链接拉不通', desc:r.msg + '。仍可保存，但在拿到能用的链接前它不会有新节点。', ok:'仍然保存', danger:true })) return
+    r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, force:1 })
+  }
+  if (!r.ok) return toast(r.msg, true)
+  toast(r.up && r.up.n ? \`已保存，抓到 \${r.up.n} 个节点\` : '已保存')
+  await syncUp(null)
 }
 window.delUp = async (id, name) => {
   if (!await modal({title:'删除订阅源', desc:\`「\${name}」及其全部节点将从订阅中移除。\`, ok:'删除', danger:true})) return
