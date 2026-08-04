@@ -1,0 +1,1 @@
+{ "name": "cf-sub-worker-test", "private": true, "dependencies": { "js-yaml": "^4.1.0" } }

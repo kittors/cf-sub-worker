@@ -1,0 +1,4 @@
+node_modules/
+test/node_modules/
+test/package-lock.json
+docs/*.png.bak

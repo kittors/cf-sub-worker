@@ -1,0 +1,42 @@
+mixed-port: 7890
+mode: rule
+proxies:
+    - { name: '剩余流量：809.16 GB', type: anytls, server: 127.0.0.1, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: 127.0.0.1, skip-cert-verify: true }
+    - { name: '距离下次重置剩余：7 天', type: anytls, server: 127.0.0.1, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: 127.0.0.1, skip-cert-verify: true }
+    - { name: 套餐到期：2026-08-10, type: anytls, server: 127.0.0.1, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: 127.0.0.1, skip-cert-verify: true }
+    - { name: 如果很少节点可用，去官网更新软件, type: vmess, server: 127.0.0.1, port: 20003, uuid: 11111111-2222-3333-4444-555555555555, alterId: 0, cipher: auto, udp: true, network: tcp }
+    - { name: 建议每天更新一次订阅, type: vmess, server: 127.0.0.1, port: 20003, uuid: 11111111-2222-3333-4444-555555555555, alterId: 0, cipher: auto, udp: true, network: tcp }
+    - { name: 2x专线-日本-1, type: anytls, server: v4-jp1.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-日本-2, type: anytls, server: v4-jp2.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-日本-3, type: anytls, server: v4-jp3.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '2x专线-日本-4 (IPv6)', type: trojan, server: v6-jp.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, skip-cert-verify: true, sni: example.invalid, client-fingerprint: chrome, network: tcp }
+    - { name: 2x专线-香港-1, type: anytls, server: v4-hk1.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-香港-2, type: anytls, server: v4-hk2.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-香港-3, type: anytls, server: v4-hk3.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '2x专线-香港-4 (IPv6)', type: trojan, server: v6-hk.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, skip-cert-verify: true, sni: example.invalid, client-fingerprint: chrome, network: tcp }
+    - { name: 香港原生IP-1|勿跑大流量, type: anytls, server: hk-native1.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 香港原生IP-2|勿跑大流量, type: anytls, server: hk-native2.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 台湾1|5x倍率|勿跑大流量, type: anytls, server: tw1.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 台湾2|5x倍率|勿跑大流量, type: anytls, server: tw2.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 新加坡1|高速下载|移动优化, type: anytls, server: sg-fast1.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 新加坡2|高速下载|移动优化, type: anytls, server: sg-fast2.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-新加坡-1, type: anytls, server: v4-sg1.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-新加坡-2, type: anytls, server: v4-sg2.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 2x专线-新加坡-3, type: anytls, server: v4-sg3.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '2x专线-新加坡-4 (IPv6)', type: trojan, server: v6-sg.example.invalid, port: 7001, password: 11111111-2222-3333-4444-555555555555, udp: true, skip-cert-verify: true, sni: example.invalid, client-fingerprint: chrome, network: tcp }
+    - { name: 韩国|移动优化, type: anytls, server: kr.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 美国堪萨斯|AI推荐, type: anytls, server: us-ks.example.invalid, port: 443, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 美国洛杉矶|高速下载, type: anytls, server: us-la.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 美国洛杉矶-1|联通优化, type: anytls, server: us-la1.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 美国洛杉矶-2, type: anytls, server: us-la2.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 美国洛杉矶-3, type: anytls, server: us-la3.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '英国 IPv6', server: '2001:db8:1::1', port: 5021, skip-cert-verify: true, sni: example.invalid, type: hysteria2, password: 11111111-2222-3333-4444-555555555555 }
+    - { name: 英国|AI推荐, type: anytls, server: uk.example.invalid, port: 443, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '德国 IPv6', server: '2001:db8:2::1', port: 5021, skip-cert-verify: true, sni: example.invalid, type: hysteria2, password: 11111111-2222-3333-4444-555555555555 }
+    - { name: 德国|AI推荐, type: anytls, server: de.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '法国 IPv6', server: '2001:db8:3::1', port: 5021, skip-cert-verify: true, sni: example.invalid, type: hysteria2, password: 11111111-2222-3333-4444-555555555555 }
+    - { name: 法国|AI推荐, type: anytls, server: fr.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: '加拿大 IPv6', server: '2001:db8:4::1', port: 5021, skip-cert-verify: true, sni: example.invalid, type: hysteria2, password: 11111111-2222-3333-4444-555555555555 }
+    - { name: 加拿大|AI推荐, type: anytls, server: ca.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 示例机场, type: select, proxies: ['♻️ 自动选择', 2x专线-日本-1, 2x专线-香港-1], url: 'http://www.example.invalid/', interval: 1800 }
+    - { name: '♻️ 自动选择', type: url-test, proxies: [2x专线-日本-1, 2x专线-香港-1], url: 'http://www.example.invalid/', interval: 1800 }
