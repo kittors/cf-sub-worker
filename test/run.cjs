@@ -6,7 +6,7 @@ global.btoa = s => Buffer.from(s, 'binary').toString('base64')
 global.atob = s => Buffer.from(s, 'base64').toString('binary')
 global.TextEncoder = TextEncoder
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -624,6 +624,73 @@ sec('19. 分流目标多选')
   ok(/\.sel\.multi \.selo::before\{/.test(ui), '多选项有常驻复选框')
   ok(ui.includes('可多选'), '标签写明可多选')
   ok(ui.includes("'（已选 1 项）'") || ui.includes('（已选 1 项）'), '单选中项也标出已选数量')
+}
+
+sec('20. 订阅源抓取：公告位置与编码兼容')
+{
+  // 机场把用量写在哪儿全凭心情。以前只扫「被识别成节点的行」的名字，
+  // 写在 YAML 注释里的一律看不见 —— 表现就是用量栏一片空白。
+  const yaml = [
+    '# 剩余流量：809.16 GB',
+    '# 套餐到期：2026-09-15',
+    'proxies:',
+    '  - {name: "香港01", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}',
+    '  - {name: "日本01", type: ss, server: 1.2.3.5, port: 443, cipher: aes-128-gcm, password: x}',
+  ].join('\n')
+  const a = T.splitFeed(yaml)
+  ok(a.nodes.length === 2, '注释不影响节点解析')
+  ok(a.notes.length === 2, '# 注释行被当作公告采集')
+  const m = T.mergeMeta(null, T.parseNotes(a.notes))
+  ok(!!m, '仅凭注释也能合成出用量信息')
+  ok(m && m.total === Math.round(809.16 * 1073741824), '注释里的剩余流量已识别')
+  ok(m && new Date(m.expire * 1000).toISOString().slice(0, 10) === '2026-09-15', '注释里的到期日已识别')
+
+  const semi = [
+    '; Traffic: 已用 390.8GB / 1200GB',
+    '  - {name: "US01", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}',
+  ].join('\n')
+  const b = T.splitFeed(semi)
+  const mb = T.mergeMeta(null, T.parseNotes(b.notes))
+  ok(mb && mb.total === Math.round(1200 * 1073741824), '; 注释与英文写法同样认')
+
+  // 含「流量」二字的正常节点名不能被误吞成公告
+  const c = T.splitFeed('  - {name: "香港原生IP-1|勿跑大流量", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}')
+  ok(c.nodes.length === 1 && c.notes.length === 0, '正常节点名不被误判为公告')
+  // 超长行多半是整段配置，不是公告
+  ok(T.splitFeed('# ' + '剩余流量：100GB '.repeat(20)).notes.length === 0, '超长行不当公告')
+
+  // 有的机场无视 clash UA 直接吐 base64
+  const inner = '  - {name: "SG01", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}'
+  const b64 = Buffer.from(inner, 'utf8').toString('base64')
+  ok(T.looksBase64(b64), 'base64 订阅可识别')
+  ok(T.b64decode(b64) === inner, 'base64 解码正确')
+  ok(!T.looksBase64('proxies:\n  - {name: a}'), '明文 YAML 不被误判为 base64')
+
+  // 诊断样本要回显给人看，密钥必须先抹掉
+  ok(!T.scrub('vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443').includes('11111111-2222'), '分享链接 UUID 已脱敏')
+  ok(T.scrub('- {name: a, password: SuperSecret123}').includes('***'), 'password 字段已脱敏')
+  ok(!T.scrub('https://a.com/sub?token=abcdef123456').includes('abcdef123456'), 'URL 里的 token 已脱敏')
+}
+
+sec('21. 订阅源增删的交互契约')
+{
+  const ui = T.adminHTML(true, true)
+  // 死链接静默收下会让人以为加成功了，实际每次聚合都白等它超时
+  ok(/canForce/.test(ui), '拉取失败时提供「仍然添加」的选择')
+  ok(ui.includes('先试拉一次'), '添加前会试拉并告知用户')
+  // 整页 dash() 会换骨架屏 + 重放入场动画，视觉上就是「闪一下」
+  ok(ui.includes('async function syncUp'), '存在局部刷新函数')
+  ok(/syncUp\(r\.up\)/.test(ui), '添加后走局部刷新而非整页重建')
+  ok(!/toast\('已添加订阅源'\); ST = null; dash\(\)/.test(ui), '添加后不再整页 dash()')
+  ok(ui.includes('function nodeCardInner'), '节点卡片可单独重绘')
+  ok(ui.includes("id=\"nodecard\""), '节点卡片有独立锚点')
+  // 用量拿不到时要说明白，而不是留一片空白
+  ok(ui.includes('用量未知'), '无用量信息时给出明确占位')
+  ok(ui.includes('window.probeUp'), '存在抓取诊断入口')
+  ok(/\.up\.src \.tgt\.mute/.test(ui), '占位有独立样式')
+  // 订阅链接大多自带 ?name=，没填名称时不该退回「未命名机场」
+  const wsrc = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
+  ok(wsrc.includes('name|remarks|title|flag'), '未填名称时从链接参数取名')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

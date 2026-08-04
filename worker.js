@@ -352,6 +352,27 @@ function toBytes(n, unit) {
   return Math.round(Number(n) * (SZ[u] || SZ.gb))
 }
 
+// 有的机场无视 clash UA，直接吐 base64 分享链接列表
+function looksBase64(s) {
+  const t = String(s).replace(/\s/g, '')
+  return t.length > 32 && /^[A-Za-z0-9+/_-]+={0,2}$/.test(t)
+}
+function b64decode(s) {
+  try {
+    const bin = atob(String(s).replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/'))
+    return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)))
+  } catch (e) { return '' }
+}
+
+// 诊断样本要给人看，但订阅原文里全是密钥，先抹掉再回显
+function scrub(line) {
+  return String(line)
+    .replace(/([?&](?:token|password|uuid|auth|key|secret|obfs-password)=)[^&\s"']+/gi, '$1***')
+    .replace(/\b((?:password|uuid|auth-?str|psk|token|secret|private-key|obfs-password)\s*[:=]\s*)["']?[\w.@:+/=-]{6,}/gi, '$1***')
+    .replace(/(\/\/)[^@\s/]{8,}(@)/g, '$1***$2')
+    .slice(0, 200)
+}
+
 // 标准头：upload=..; download=..; total=..; expire=..（expire 有秒也有毫秒）
 function parseUserinfo(h) {
   if (!h) return null
@@ -428,25 +449,40 @@ function mergeMeta(head, note) {
   return (m.total || m.expire) ? m : null
 }
 
+// 把订阅原文切成「节点行」与「公告行」。正式拉取与诊断共用，
+// 否则两边各写一遍，诊断说能解析、实际拉取却是空的，白折腾。
+function splitFeed(text) {
+  const nodes = [], notes = []
+  for (const line of text.split('\n')) {
+    const p = parseProxyLine(line)
+    if (!p) {
+      // 公告不一定是节点行。有的机场写成 YAML 注释（# 剩余流量：xxx），
+      // 有的直接是裸文本行 —— 这些 parseProxyLine 一律返回 null，
+      // 以前连同真正的垃圾行一起丢掉，用量与到期就此丢失。
+      const t = line.replace(/^\s*[#;]+\s*/, '').replace(/^\s*-\s*/, '').trim()
+      if (t && t.length < 120 && JUNK.test(t)) notes.push(t)
+      continue
+    }
+    if (/^(select|url-test|fallback|load-balance|relay)$/.test(p.type)) continue   // proxy-group
+    // 公告条目不是节点，但流量/到期常藏在里面，先留作兜底解析
+    if (JUNK.test(p._name) || unquote(p.server || '') === '127.0.0.1') { notes.push(p._name); continue }
+    nodes.push(p)
+  }
+  return { nodes, notes }
+}
+
 // 拉一个机场，返回原始节点（未重命名）与订阅元信息
 async function fetchUpstream(u) {
   const r = await fetch(u.url, { headers: { 'User-Agent': UPSTREAM_UA }, cf: { cacheTtl: 0 } })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const head = parseUserinfo(r.headers.get('subscription-userinfo'))
-  const text = await r.text()
-  const notes = []
-
-  const out = []
-  for (const line of text.split('\n')) {
-    const p = parseProxyLine(line)
-    if (!p) continue
-    if (/^(select|url-test|fallback|load-balance|relay)$/.test(p.type)) continue   // proxy-group
-    // 公告条目不是节点，但流量/到期常藏在里面，先留作兜底解析
-    if (JUNK.test(p._name)) { notes.push(p._name); continue }
-    if (unquote(p.server || '') === '127.0.0.1') { notes.push(p._name); continue }
-    const hit = REGIONS.find(r => r.re.test(p._name))
-    out.push({ up: u.id, upName: u.name, region: hit.key, raw: p._name, kv: p })
-  }
+  const raw = await r.text()
+  const text = looksBase64(raw) ? b64decode(raw) : raw   // 有的机场无视 UA 直接吐 base64
+  const { nodes, notes } = splitFeed(text)
+  const out = nodes.map(p => ({
+    up: u.id, upName: u.name, raw: p._name, kv: p,
+    region: REGIONS.find(x => x.re.test(p._name)).key
+  }))
   return { nodes: out, info: mergeMeta(head, parseNotes(notes)) }
 }
 
@@ -643,9 +679,33 @@ async function apiRoute(req, url, event) {
   if (p === '/api/upstreams' && req.method === 'POST') {
     const body = await req.json().catch(() => ({}))
     const ups = await kvGet('upstreams', [])
+    let added = null, addedN = 0
     if (body.act === 'add') {
       if (!/^https?:\/\//.test(body.url || '')) return json({ ok: false, msg: '链接需以 http(s):// 开头' }, 400)
-      ups.push({ id: randHex(6), name: body.name || '未命名机场', url: body.url, enabled: true })
+      // 没填名称时从链接里捡：多数机场的订阅 URL 自带 ?name= 或 ?remarks=
+      let nm = String(body.name || '').trim()
+      if (!nm) {
+        const q = (body.url.split('?')[1] || '')
+        for (const seg of q.split('&')) {
+          const [k, v] = seg.split('=')
+          if (/^(name|remarks|title|flag)$/i.test(k || '') && v) {
+            try { nm = decodeURIComponent(v).slice(0, 30) } catch (e) { nm = v.slice(0, 30) }
+            break
+          }
+        }
+      }
+      added = { id: randHex(6), name: nm || '未命名机场', url: body.url, enabled: true }
+      // 先试拉一次再落库。死链接静默收下的话，用户以为加成功了，
+      // 实际每次聚合都白等它超时，还得自己去猜哪一条坏了。
+      if (!body.force) {
+        let probe = null, err = ''
+        try { probe = await fetchUpstream(added) }
+        catch (e) { err = String(e && e.message || e) }
+        if (err) return json({ ok: false, msg: '拉取失败：' + err, canForce: true }, 400)
+        if (!probe.nodes.length) return json({ ok: false, msg: '链接能访问，但没解析出任何节点', canForce: true }, 400)
+        addedN = probe.nodes.length   // 只回给前端做提示，不落库
+      }
+      ups.push(added)
     } else if (body.act === 'del') {
       const i = ups.findIndex(u => u.id === body.id)
       if (i >= 0) ups.splice(i, 1)
@@ -656,7 +716,43 @@ async function apiRoute(req, url, event) {
 
     await kvPut('upstreams', ups)
     await CONF.delete('cache:nodes')     // 配置变了，缓存立即作废
-    return json({ ok: true })
+    // 前端据此增量插入一行，不必整页重拉
+    return json({ ok: true, up: added ? { ...added, n: addedN } : null })
+  }
+
+  // 单个订阅源的抓取诊断：机场到底给没给用量信息、我们又解析出了什么。
+  // 元信息缺失时光看 UI 分不清是「机场没提供」还是「我们没解析出来」，
+  // 这个接口把两者分开，省得靠猜。
+  if (p === '/api/probe' && req.method === 'POST') {
+    const { id } = await req.json().catch(() => ({}))
+    const u = (await kvGet('upstreams', [])).find(x => x.id === id)
+    if (!u) return json({ ok: false, msg: '订阅源不存在' }, 404)
+    try {
+      const r = await fetch(u.url, { headers: { 'User-Agent': UPSTREAM_UA }, cf: { cacheTtl: 0 } })
+      const raw = await r.text()
+      const hdrs = {}
+      for (const k of ['subscription-userinfo', 'content-type', 'content-disposition', 'profile-update-interval', 'profile-web-page-url'])
+        if (r.headers.get(k)) hdrs[k] = r.headers.get(k)
+
+      const decoded = looksBase64(raw) ? b64decode(raw) : raw
+      const fmt = /^\s*(proxies:|port:|mixed-port:|mode:)/m.test(decoded) ? 'Clash YAML'
+                : /"outbounds"\s*:/.test(decoded) ? 'sing-box JSON'
+                : looksBase64(raw) ? 'base64 分享链接'
+                : /:\/\//.test(decoded) ? '明文分享链接' : '未识别'
+
+      const { nodes, notes } = splitFeed(decoded)
+      const head = parseUserinfo(r.headers.get('subscription-userinfo'))
+      const note = parseNotes(notes)
+      return json({
+        ok: true, name: u.name, http: r.status, bytes: raw.length, fmt,
+        headers: hdrs, hasUserinfo: !!r.headers.get('subscription-userinfo'),
+        nodes: nodes.length, notes, head, note, meta: mergeMeta(head, note),
+        // 前若干行原文，用于识别没见过的格式；顺带抹掉密钥字段
+        sample: decoded.split('\n').filter(l => l.trim()).slice(0, 14).map(scrub)
+      })
+    } catch (e) {
+      return json({ ok: true, name: u.name, http: 0, err: String(e && e.message || e) })
+    }
   }
 
   if (p === '/api/node' && req.method === 'POST') {
@@ -1472,6 +1568,11 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 .up .u{color:var(--tx3);font:11.5px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .up.src .tgt{font-variant-numeric:tabular-nums;white-space:nowrap;justify-self:end}
 .up.src .tgt.hot{background:var(--warnBg);border-color:var(--warnBd);color:var(--warn)}
+/* 用量拿不到时的占位，点进去看抓取诊断 */
+.up.src .tgt.mute{color:var(--tx3);border-style:dashed;cursor:pointer;transition:color .15s,border-color .15s}
+.up.src .tgt.mute:hover{color:var(--acc);border-color:var(--accBd)}
+/* 局部刷新期间给节点卡片一点反馈，但不换骨架屏——那会整块闪 */
+#nodecard.busy{opacity:.55;transition:opacity .2s;pointer-events:none}
 .bar{height:4px;border-radius:2px;background:var(--bd2);overflow:hidden;width:46px;align-self:center}
 .bar i{display:block;height:100%;background:var(--ok);border-radius:2px;transition:width .3s var(--e)}
 .bar.hot i{background:var(--warn)}
@@ -1600,7 +1701,7 @@ function toast(msg, err){
   el.dataset.t = setTimeout(el.kill, 2600)
 }
 
-function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, onMount}){
+function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, noCancel = false, onMount}){
   return new Promise(resolve => {
     const bd = document.createElement('div')
     bd.className = 'bd'
@@ -1610,7 +1711,7 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
         \${html ? \`<div class="bdy">\${html}</div>\` : ''}
         \${fields.length ? \`<div class="bdy">\${fields.map((f,i)=>\`<input data-i="\${i}" placeholder="\${esc(f.ph||'')}" value="\${esc(f.val||'')}">\`).join('')}</div>\` : ''}
       </div>
-      <div class="ft"><button class="g" data-x>取消</button>
+      <div class="ft">\${noCancel?'':'<button class="g" data-x>取消</button>'}
         <button data-ok \${danger?'style="background:var(--warn)"':''}>\${esc(ok)}</button></div>
     </div>\`
     document.body.appendChild(bd)
@@ -1856,14 +1957,15 @@ function viewNode(){
   h += \`<div class="card anim" style="animation-delay:.06s"><div class="ttl">订阅源<span class="sp"></span>
     <button class="sm" onclick="addUp()">\${icon('plus','s')}添加</button></div>\`
   h += '<div class="uplist src">'
-  h += ST.upstreams.map(u => \`<div class="up src \${u.enabled===false?'off':''}">
-      <span class="dot"></span><span class="nm">\${esc(u.name)}</span><span class="u">\${esc(u.url)}</span>
-      \${upMeta((ST.meta || {})[u.id])}
-      <button class="sw" data-on="\${u.enabled===false?0:1}" data-tip="\${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','\${u.id}',this)"><i></i></button>
-      <button class="ib dl" data-tip="删除" onclick="delUp('\${u.id}','\${esc(u.name)}')">\${icon('trash')}</button>
-    </div>\`).join('') || '<div class="empty">还没有订阅源</div>'
+  h += ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
   h += '</div></div>'
-  h += \`<div class="card anim" style="animation-delay:.10s"><div class="ttl">节点<span class="sp"></span>
+  h += \`<div class="card anim" style="animation-delay:.10s" id="nodecard">\${nodeCardInner()}</div>\`
+  return h + '<div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+}
+
+// 单独一份，增删订阅源后只重绘这一块，不必整页重建
+function nodeCardInner(){
+  let h = \`<div class="ttl">节点<span class="sp"></span>
     <button class="g sm" onclick="foldAll(true)">展开全部</button>
     <button class="g sm" onclick="foldAll(false)">收起全部</button>
     <button class="ib" data-tip="重新拉取" onclick="refresh(this)">\${icon('refresh')}</button></div>\`
@@ -1886,7 +1988,16 @@ function viewNode(){
     h += '</div></div></div>'
   }
   if (!ST.regions.length) h += '<div class="empty">暂无节点，先添加订阅源</div>'
-  return h + '</div><div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+  return h
+}
+
+function upRow(u){
+  return \`<div class="up src \${u.enabled===false?'off':''}" data-id="\${u.id}">
+      <span class="dot"></span><span class="nm">\${esc(u.name)}</span><span class="u">\${esc(u.url)}</span>
+      \${upMeta((ST.meta || {})[u.id], u.id)}
+      <button class="sw" data-on="\${u.enabled===false?0:1}" data-tip="\${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','\${u.id}',this)"><i></i></button>
+      <button class="ib dl" data-tip="删除" onclick="delUp('\${u.id}','\${esc(u.name)}')">\${icon('trash')}</button>
+    </div>\`
 }
 
 /* 带「全部」语义的多选：'all' 与具体白名单二选一 */
@@ -2093,9 +2204,12 @@ function fmtSize(b){
 }
 // 机场的流量与到期。返回三个平级元素（进度条 / 流量 / 到期），
 // 缺项用空 span 占位——列数恒定，各行才能逐列对齐。
-function upMeta(m){
+function upMeta(m, id){
   const blank = '<span></span>'
-  if (!m) return blank + blank + blank
+  // 拿不到就直说，并给一个查抓取详情的入口。
+  // 以前这里是三个空 span，一片空白，分不清是机场没给还是我们没解析出来。
+  if (!m) return blank + blank +
+    \`<span class="tgt mute" data-tip="点击查看抓取详情" onclick="probeUp('\${id||''}')">用量未知</span>\`
   let bar = blank, traffic = blank, exp = blank
   if (m.total > 0) {
     const left = Math.max(0, m.total - m.up - m.down)
@@ -2498,17 +2612,70 @@ window.resetOwn = async () => {
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
 window.addUp = async () => {
-  const v = await modal({ title:'添加订阅源', desc:'填入机场提供的订阅链接，保存后立即拉取。', fields:[{ph:'名称，便于区分多个来源'},{ph:'https://...'}], ok:'添加' })
+  const v = await modal({ title:'添加订阅源', desc:'填入机场提供的订阅链接。保存前会先试拉一次，确认能解析出节点。', fields:[{ph:'名称，便于区分多个来源'},{ph:'https://...'}], ok:'添加' })
   if (!v) return
   const [name, url] = v
   if (!url) return toast('订阅链接不能为空', true)
-  const r = await api('/api/upstreams', {act:'add', name, url})
+  let r = await api('/api/upstreams', {act:'add', name, url})
+  // 试拉不通就问一句，而不是默默收下一个死链接
+  if (!r.ok && r.canForce) {
+    if (!await modal({ title:'这个链接拉不通', desc:r.msg + '。仍可先加进来之后再排查，但它不会贡献任何节点。', ok:'仍然添加', danger:true })) return
+    r = await api('/api/upstreams', {act:'add', name, url, force:1})
+  }
   if (!r.ok) return toast(r.msg, true)
-  toast('已添加订阅源'); ST = null; dash()
+  toast(r.up && r.up.n ? \`已添加，解析到 \${r.up.n} 个节点\` : '已添加订阅源')
+  await syncUp(r.up)
 }
 window.delUp = async (id, name) => {
   if (!await modal({title:'删除订阅源', desc:\`「\${name}」及其全部节点将从订阅中移除。\`, ok:'删除', danger:true})) return
-  await api('/api/upstreams', {act:'del', id}); toast('已删除'); ST = null; dash()
+  await api('/api/upstreams', {act:'del', id})
+  const row = document.querySelector(\`.uplist.src .up[data-id="\${id}"]\`)
+  if (row) row.remove()
+  toast('已删除'); await syncUp(null)
+}
+
+// 增删订阅源后的局部刷新：新行立刻插入，数据后台重取，
+// 只重绘受影响的两处。整页 dash() 会换骨架屏 + 重放入场动画，看着就是「闪一下」。
+async function syncUp(nu){
+  const list = document.querySelector('.uplist.src')
+  if (nu && list) {
+    const em = list.querySelector('.empty')
+    if (em) em.remove()
+    ST.upstreams.push(nu)
+    list.insertAdjacentHTML('beforeend', upRow(nu))
+  }
+  const card = document.getElementById('nodecard')
+  if (card) card.classList.add('busy')
+  PRF = null                       // 档案的机场选项依赖它
+  const r = await api('/api/state')
+  if (card) card.classList.remove('busy')
+  if (!r || !r.ok) return
+  ST = r
+  paintHeader()                    // 顶部「N 个订阅源 · M 个节点」
+  if (list) list.innerHTML = ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
+  if (card) card.innerHTML = nodeCardInner()
+}
+
+window.probeUp = async (id) => {
+  if (!id) return
+  const r = await api('/api/probe', { id })
+  if (!r.ok) return toast(r.msg || '诊断失败', true)
+  const row = (k, v) => \`<div class="up" style="grid-template-columns:104px minmax(0,1fr)">
+    <span class="nm">\${k}</span><span class="u" style="white-space:pre-wrap">\${esc(String(v))}</span></div>\`
+  let h = '<div class="uplist" style="grid-template-columns:104px minmax(0,1fr)">'
+  if (r.http === 0) {
+    h += row('结果', '请求失败：' + (r.err || '未知错误'))
+  } else {
+    h += row('HTTP', r.http) + row('响应格式', r.fmt) + row('大小', r.bytes + ' 字节') + row('解析到节点', r.nodes + ' 个')
+    h += row('Subscription-Userinfo 头', r.hasUserinfo ? r.headers['subscription-userinfo'] : '机场未返回该响应头')
+    h += row('识别到的公告行', r.notes.length ? r.notes.join('\\n') : '（无）')
+    h += row('最终用量信息', r.meta
+      ? \`总量 \${r.meta.total ? fmtSize(r.meta.total) : '未知'} · 已用 \${fmtSize((r.meta.up||0)+(r.meta.down||0))} · 到期 \${r.meta.expire ? new Date(r.meta.expire*1000).toLocaleDateString('zh-CN') : '未知'}\`
+      : '解析不出 —— 上面两行都没有可用信息')
+    h += row('响应前几行', r.sample.join('\\n'))
+  }
+  h += '</div>'
+  await modal({ title:'抓取诊断 · ' + r.name, desc:'机场到底给了什么，我们又解析出了什么。密钥字段已抹去。', html:h, ok:'知道了', noCancel:true, wide:true })
 }
 window.upAct = async (act, id, el) => {
   if (act === 'toggle' && el) {
