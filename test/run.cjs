@@ -6,7 +6,7 @@ global.btoa = s => Buffer.from(s, 'binary').toString('base64')
 global.atob = s => Buffer.from(s, 'base64').toString('binary')
 global.TextEncoder = TextEncoder
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -32,7 +32,7 @@ const OWN = { usV2:{name:'自建-A',type:'vless',s:'node.example.com',p:443,u:'1
 const SET = { domain:'sub.example.com', directDomains:['api.example.com'], directIPs:['203.0.113.10'] }
 
 sec('1. 节点解析')
-ok(up.length === 32, `解析 32 个节点（实际 ${up.length}）`)
+ok(up.length === 35, `解析 35 个节点（实际 ${up.length}）`)
 ok(new Set(up.map(n => n.name)).size === up.length, '节点名无重复')
 
 sec('2. Clash YAML')
@@ -43,7 +43,7 @@ if (cd) {
   const names = cd.proxies.map(p => p.name)
   const groups = cd['proxy-groups'].map(g => g.name)
   const valid = new Set([...names, ...groups, 'DIRECT', 'REJECT'])
-  ok(cd.proxies.length === 34, `proxies 34（实际 ${cd.proxies.length}）`)
+  ok(cd.proxies.length === 37, `proxies 37（实际 ${cd.proxies.length}）`)
   ok(new Set(names).size === names.length, 'proxies 无重名')
   ok(new Set(groups).size === groups.length, 'proxy-groups 无重名')
 
@@ -111,14 +111,27 @@ try {
   links = Buffer.from(b64, 'base64').toString('utf8').split('\n').filter(Boolean)
   ok(true, 'base64 可解码')
 } catch (e) { ok(false, 'base64 解码失败') }
-ok(links.length === 34, `链接数 34（实际 ${links.length}）`)
+ok(links.length === 37, `链接数 37（实际 ${links.length}）`)
 const schemes = [...new Set(links.map(l => l.split('://')[0]))]
 ok(schemes.every(s => ['vless','hysteria2','trojan','anytls','ss','vmess'].includes(s)), '协议头合法: ' + schemes.join(','))
 let badUrl = links.filter(l => { try { new URL(l); return false } catch { return true } })
 ok(badUrl.length === 0, '所有链接可被 URL 解析' + (badUrl.length ? ': ' + badUrl[0] : ''))
 const vl = links.find(l => l.startsWith('vless://'))
 ok(vl && vl.includes('security=reality') && vl.includes('pbk=') && vl.includes('sid='), 'VLESS 含 Reality 参数')
-ok(links.every(l => l.includes('#')), '所有链接带名称锚点')
+// vmess 的名字在 base64 JSON 的 ps 字段里，按规范就没有 # 锚点，不能一刀切要求
+const noName = links.filter(l => {
+  if (!l.startsWith('vmess://')) return !l.includes('#')
+  try { return !JSON.parse(Buffer.from(l.slice(8), 'base64').toString('utf8')).ps } catch (e) { return true }
+})
+ok(noName.length === 0, '所有链接都带得出名称' + (noName.length ? ': ' + noName[0].slice(0, 40) : ''))
+// 上游的 vless / vmess 以前整条导不出来，导出的那些也丢了传输层参数
+const upWs = links.find(l => l.startsWith('vless://') && l.includes('type=ws'))
+ok(upWs && /[?&]path=/.test(upWs) && /[?&]host=/.test(upWs), '上游 VLESS+ws 带出 path 与 Host')
+const upVmess = links.find(l => l.startsWith('vmess://'))
+let vmj = null
+try { vmj = JSON.parse(Buffer.from(upVmess.slice(8), 'base64').toString('utf8')) } catch (e) {}
+ok(vmj && vmj.net === 'ws' && vmj.path === '/vm' && vmj.host === 'example.invalid' && vmj.tls === 'tls',
+  'VMess 带出 ws 传输层与 tls' + (vmj ? '' : '（解析失败）'))
 
 sec('6. 目标解析与边界')
 ok(T.resolveTarget('direct', [], OWN) === 'DIRECT', 'direct → DIRECT')
@@ -548,7 +561,10 @@ sec('18. 源码不含站点信息（开源前置检查）')
 
   ok(!/\bcf[a-z]{2}_[A-Za-z0-9]{20,}/.test(all), '无 Cloudflare API token')
 
-  const ips = (all.match(/\b(\d{1,3}\.){3}\d{1,3}\b/g) || []).filter(ip => !SAFE_IP.test(ip))
+  // 浏览器 UA 里的版本号（Chrome/126.0.0.0）长得和 IP 一样，先摘掉再查。
+  // 只剥「产品名/版本号」这一种形状，`http://1.2.3.4` 那样的真泄露照样抓得到。
+  const ipScan = all.replace(/\b[A-Za-z][\w.]*\/\d+(?:\.\d+)+/g, '')
+  const ips = (ipScan.match(/\b(\d{1,3}\.){3}\d{1,3}\b/g) || []).filter(ip => !SAFE_IP.test(ip))
   ok(ips.length === 0, '无真实公网 IP' + (ips.length ? '：' + ips[0] : ''))
 
   // 域名同理：只允许保留给文档用的示例域名
@@ -845,6 +861,202 @@ sec('25. 地区识别：全量国家覆盖')
   ok(wsrc3.includes('function regionOf'), '地区判定收敛到单一入口')
   ok((wsrc3.match(/REGIONS\.find\(x => x\.re\.test/g) || []).length === 1,
      '没有第二处各写各的地区判定')
+}
+
+sec('26. 入站格式：分享链接 / 块式 YAML')
+{
+  // 机场按 UA 给什么格式全凭它高兴。只认一种的后果是「换个 UA 重试」
+  // 和「粘贴导入」这两条退路一起失效 —— 链接被 403 挡住时就彻底没辙了。
+  const P = T.parseShareLine
+
+  const vl = P('vless://11111111-2222-3333-4444-555555555555@a.example.invalid:443?type=ws&security=tls&sni=s.example.invalid&fp=chrome&host=h.example.invalid&path=%2Fray#%E6%97%A5%E6%9C%AC01')
+  ok(vl && vl.type === 'vless' && vl.server === 'a.example.invalid' && vl.port === '443', 'vless 基本字段')
+  ok(vl && vl._name === '日本01', 'fragment urldecode 成节点名')
+  ok(vl && vl.network === 'ws' && /path: \/ray/.test(vl['ws-opts']) && /Host: h\.example\.invalid/.test(vl['ws-opts']), 'vless ws 传输层')
+  ok(vl && vl.servername === 's.example.invalid' && vl['client-fingerprint'] === 'chrome', 'sni 映射到 servername')
+
+  const re = P('vless://11111111-2222-3333-4444-555555555555@b.example.invalid:443?security=reality&pbk=-PLACEHOLDERPUBKEY0000&sid=0123456789abcdef&flow=xtls-rprx-vision#R')
+  ok(re && re.flow === 'xtls-rprx-vision', 'reality 的 flow')
+  ok(re && /public-key: '-PLACEHOLDERPUBKEY0000'/.test(re['reality-opts']), "以 '-' 开头的 public-key 自动加引号")
+
+  const tj = P('trojan://pwd@[2001:db8::1]:443?sni=s.example.invalid&allowInsecure=1#IPv6')
+  ok(tj && tj.server === '2001:db8::1', 'IPv6 方括号已剥离')
+  ok(tj && tj.sni === 's.example.invalid' && tj['skip-cert-verify'] === 'true', 'trojan 用 sni 字段名')
+
+  const hy = P('hysteria2://pwd@c.example.invalid:35000/?insecure=1&sni=s.example.invalid&obfs=salamander&obfs-password=op&mport=35000-39000#US')
+  ok(hy && hy.type === 'hysteria2' && hy.ports === '35000-39000' && hy.obfs === 'salamander', 'hysteria2 含端口跳跃与 obfs')
+
+  ok(P('ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@d.example.invalid:8388#SS').cipher === 'aes-256-gcm', 'ss SIP002 格式')
+  const ssOld = 'ss://' + Buffer.from('aes-256-gcm:password@e.example.invalid:8388', 'utf8').toString('base64') + '#SSOld'
+  ok(P(ssOld) && P(ssOld).server === 'e.example.invalid', 'ss 整串 base64 的老格式')
+
+  const vm = 'vmess://' + Buffer.from(JSON.stringify({v:'2',ps:'VM01',add:'f.example.invalid',port:'443',id:'11111111-2222-3333-4444-555555555555',aid:'0',net:'ws',host:'h.example.invalid',path:'/vm',tls:'tls'}), 'utf8').toString('base64')
+  const vmn = P(vm)
+  ok(vmn && vmn._name === 'VM01' && vmn.network === 'ws' && vmn.tls === 'true', 'vmess base64 JSON 格式')
+
+  ok(P('http://example.invalid/x') === null && P('随便一行文字') === null, '非分享链接返回 null')
+
+  // 块式 YAML：v2board 系最常见的写法，缩进字段要收成和单行格式一样的形状
+  const blockY = [
+    'proxies:',
+    '  - name: "🇭🇰 香港 01"',
+    '    type: vmess',
+    '    server: hk.example.invalid',
+    '    port: 443',
+    '    uuid: 11111111-2222-3333-4444-555555555555',
+    '    network: ws',
+    '    ws-opts:',
+    '      path: /ray',
+    '      headers:',
+    '        Host: hk.example.invalid',
+    '  - name: "剩余流量：500.5 GB"',
+    '    type: trojan',
+    '    server: 127.0.0.1',
+    '    port: 1',
+    '    password: x',
+    'rules:',
+    '  - DOMAIN-SUFFIX,example.invalid,DIRECT',
+  ].join('\n')
+  const bf = T.splitFeed(blockY)
+  ok(bf.nodes.length === 1, '块式 YAML 解析出节点')
+  ok(bf.notes.length === 1 && bf.notes[0].includes('500.5'), '块式里的公告条目照样识别')
+  ok(/path: \/ray/.test(bf.nodes[0]['ws-opts']) && /Host: hk\.example\.invalid/.test(bf.nodes[0]['ws-opts']), '多层缩进收成 flow 字符串')
+
+  // 同一份订阅的两种表达必须解析出同一批节点，否则换 UA 重试就成了开盲盒
+  const asShare = [
+    'vless://11111111-2222-3333-4444-555555555555@a.example.invalid:443?type=ws&security=tls&host=h.example.invalid&path=%2Fray#JP01',
+    'hysteria2://pwd@c.example.invalid:35000/?sni=s.example.invalid#US01',
+  ].join('\n')
+  const asYaml = [
+    'proxies:',
+    "  - {name: JP01, type: vless, server: a.example.invalid, port: 443, tls: true, network: ws, ws-opts: { path: /ray, headers: { Host: h.example.invalid } }}",
+    '  - {name: US01, type: hysteria2, server: c.example.invalid, port: 35000, password: pwd, sni: s.example.invalid}',
+  ].join('\n')
+  const s1 = T.splitFeed(asShare), s2 = T.splitFeed(asYaml)
+  ok(s1.nodes.length === s2.nodes.length && s1.nodes.length === 2, '两种格式节点数一致')
+  ok(s1.nodes.map(n => n._name).join() === s2.nodes.map(n => n._name).join(), '两种格式节点名一致')
+  ok(s1.nodes[0].network === s2.nodes[0].network && s1.nodes[0]['ws-opts'] === s2.nodes[0]['ws-opts'], '两种格式传输层一致')
+
+  // base64 包裹的分享链接：浏览器直接打开订阅链接看到的就是这个
+  const wrapped = Buffer.from(asShare, 'utf8').toString('base64')
+  ok(T.splitFeed(T.b64decode(wrapped)).nodes.length === 2, 'base64 包裹的分享链接列表')
+
+  // flow 字符串的正反变换必须闭环，否则 sing-box / 分享链接导出会读空
+  const fl = T.nestFlow({ path: '/x', headers: { Host: 'h.example.invalid' }, empty: '' })
+  ok(fl === '{ path: /x, headers: { Host: h.example.invalid } }', 'nestFlow 跳过空值')
+  const back = T.parseFlow(fl)
+  ok(back.path === '/x' && back.headers.Host === 'h.example.invalid', 'parseFlow 还原嵌套')
+  ok(T.parseFlow(T.nestFlow({ k: '-dash' })).k === '-dash', "带引号的值能原样还原")
+}
+
+sec('27. rules 段不再全量扫描（免费版 CPU 预算）')
+{
+  // 完整 Clash 配置里 rules 能有上万行，既没有节点也没有公告。
+  // 免费版单次请求只有 10ms CPU，白扫这一段就能把预算耗光。
+  const head = ['proxies:', "  - {name: JP01, type: ss, server: a.example.invalid, port: 443, cipher: aes-128-gcm, password: x}"]
+  const rules = ['rules:', ...Array.from({ length: 20000 }, (_, i) => `  - DOMAIN-SUFFIX,d${i}.example.invalid,DIRECT`)]
+  const big = [...head, ...rules].join('\n')
+  const r = T.splitFeed(big)
+  ok(r.nodes.length === 1, '大 rules 段不影响节点解析')
+
+  // rules 段里的行也是 `- xxx` 列表项，长得像节点，一条都不该被收进来
+  const trap = [...head, ...rules.slice(0, 50),
+    '  - {name: TRAP, type: ss, server: b.example.invalid, port: 443, cipher: aes-128-gcm, password: x}'].join('\n')
+  const tr = T.splitFeed(trap)
+  ok(tr.nodes.length === 1 && tr.nodes[0]._name === 'JP01', 'rules 段里的行不被当成节点')
+
+  // 这条才是 break 的守卫。没有 break 的话，rules 每一行仍要过一遍 JUNK
+  // 正则 —— CPU 就是这么烧掉的。藏在 rules 之后的公告若能被读到，
+  // 就说明还在往下扫。用行为断言而不是计时：计时会随机器负载误报，
+  // 别把「性能有没有回归」赌在跑测试那一刻的负载上。
+  ok(T.splitFeed([...head, ...rules.slice(0, 50), '# 剩余流量：100 GB'].join('\n')).notes.length === 0,
+     '扫到 rules 即停止，之后的内容一概不看')
+  const timeIt = t => { for (let i = 0; i < 3; i++) T.splitFeed(t); const s = process.hrtime.bigint(); for (let i = 0; i < 5; i++) T.splitFeed(t); return Number(process.hrtime.bigint() - s) / 5e6 }
+  console.log(`  ℹ️  参考耗时：无 rules ${timeIt(head.join('\n')).toFixed(2)}ms · 两万行 rules ${timeIt(big).toFixed(2)}ms`)
+
+  // 公告若写在 rules 之后就读不到了 —— 机场都写在头部，这是可接受的取舍，
+  // 但 proxies 段里的公告条目必须照常识别
+  const withNote = ['# 剩余流量：100 GB', ...head, ...rules.slice(0, 5)].join('\n')
+  ok(T.splitFeed(withNote).notes.length === 1, 'rules 之前的公告仍然采集')
+}
+
+sec('28. 拉不通时的退路：粘贴导入')
+{
+  const u = { id: 'test01', name: '测试机场' }
+  const feed = [
+    'vless://11111111-2222-3333-4444-555555555555@a.example.invalid:443?type=ws&security=tls&path=%2Fray#%F0%9F%87%AF%F0%9F%87%B5JP01',
+    'hysteria2://pwd@c.example.invalid:35000/?sni=s.example.invalid#%F0%9F%87%BA%F0%9F%87%B8US01',
+    'trojan://pwd@d.example.invalid:443?sni=s.example.invalid#%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A500.5%20GB',
+  ].join('\n')
+  const r = T.parsePasted(feed, u)
+  ok(!r.err && r.got.nodes.length === 2, '粘贴分享链接列表可解析')
+  ok(r.got.nodes[0].up === 'test01' && r.got.nodes[0].region === 'jp', '节点带上来源与地区')
+  ok(r.got.info && r.got.info.total === Math.round(500.5 * 1073741824), '公告藏在 fragment 里也能出用量')
+
+  ok(T.parsePasted(Buffer.from(feed, 'utf8').toString('base64'), u).got.nodes.length === 2, '粘贴 base64 整份订阅')
+
+  // 复制错东西是常事，得说清楚而不是静默收下一个空源
+  ok(!!T.parsePasted('', u).err, '空内容被拒')
+  ok(!!T.parsePasted('   \n  ', u).err, '纯空白被拒')
+  ok(!!T.parsePasted('<html><body>Just a moment...</body></html>', u).err, '误粘网页被拒')
+  ok(T.parsePasted('乱码乱码', u).err.includes('订阅内容本身'), '拒绝时提示该复制什么')
+
+  // 逐个 UA 试完还是不行，错误得说清楚卡在哪儿
+  ok(T.triesMsg([{ ua: 'a', status: 403, body: 'Sorry, you have been blocked' }, { ua: 'b', status: 403 }])
+     === 'HTTP 403（Sorry, you have been blocked）', '403 带上拦截页正文')
+  ok(T.triesMsg([{ ua: 'a', status: 200, n: 0 }, { ua: 'b', status: 200, n: 0 }]).includes('都能访问，但都没解析出节点'),
+     '能访问但解析不出，措辞要和拉不通区分开')
+  ok(T.triesMsg([{ ua: 'a', status: 403 }, { ua: 'b', err: 'connection lost' }]) === 'HTTP 403；connection lost', '多种失败合并去重')
+
+  // 粘贴导入的源没有链接可拉，别去 fetch 空串
+  ok(T.feedFormat('proxies:\n  - {}', 'proxies:\n  - {}') === 'Clash YAML', '格式识别：Clash')
+  const oneLink = 'vless://11111111-2222-3333-4444-555555555555@a.example.invalid:443#X'
+  ok(T.feedFormat(Buffer.from(oneLink, 'utf8').toString('base64'), oneLink) === 'base64 分享链接', '格式识别：base64')
+  ok(T.feedFormat(oneLink, oneLink) === '明文分享链接', '格式识别：明文分享链接')
+
+  const ui = T.adminHTML(true, true)
+  ok(/canPaste/.test(ui), '拉取失败时提供粘贴入口')
+  ok(ui.includes('全选复制'), '告诉用户具体该怎么做')
+  ok(/act:'add', name, url, text/.test(ui) || /act:'add', name, url, text:t2/.test(ui), '添加时把粘贴内容一起提交')
+  // 服务端返回非 JSON（CPU 超限的 1102 页、网关错误）时不能静默失败
+  ok(/JSON\.parse\(raw\)/.test(ui) && /非 JSON 响应/.test(ui), 'api() 兜住非 JSON 响应')
+}
+
+sec('29. sing-box：不支持的协议不得留下悬空引用')
+{
+  // 以前 toSB 认不出的协议被 filter 掉，地区组却仍按全量节点取名字，
+  // 于是引用一堆不存在的 tag —— sing-box 是拒绝加载整份配置，不是跳过那几个。
+  const mk = (name, region, kv) => ({ up: 'x', upName: 'A', region, raw: name, name, key: 'x::' + name, kv })
+  const weird = [
+    mk('🇯🇵 日本 01', 'jp', { type: 'ss', server: 'a.example.invalid', port: '443', cipher: 'aes-128-gcm', password: 'x' }),
+    mk('🇯🇵 日本 02', 'jp', { type: 'wireguard', server: 'b.example.invalid', port: '443' }),   // toSB 认不出
+    mk('🇭🇰 香港 01', 'hk', { type: '未来协议', server: 'c.example.invalid', port: '443' }),     // 同上
+  ]
+  ok(T.toSB(weird[1]) === null && T.toSB(weird[2]) === null, '认不出的协议返回 null')
+  const sb = JSON.parse(T.genSB(weird, P, LIB, OWN, SET))
+  const tags = new Set(sb.outbounds.map(o => o.tag))
+  const miss = []
+  sb.outbounds.forEach(o => (o.outbounds || []).forEach(x => { if (!tags.has(x)) miss.push(`${o.tag}→${x}`) }))
+  sb.route.rules.forEach(r => { if (r.outbound && !tags.has(r.outbound)) miss.push('rule→' + r.outbound) })
+  ok(miss.length === 0, '认不出的节点连同分组引用一起剔除' + (miss.length ? ': ' + miss.slice(0, 3) : ''))
+  ok(!tags.has('🇭🇰 香港 01'), '整个香港组消失，而不是留一个空组')
+  ok(tags.has('🇯🇵 日本'), '仍有可用节点的地区组保留')
+
+  // fixture 里的 vless 上游节点必须真的转出 outbound。
+  // 自有节点也是 vless+reality，按 tag 排除掉，否则断言会命中它而不是上游节点。
+  const sd = JSON.parse(T.genSB(up, P, LIB, OWN, SET))
+  const ownTags = new Set(Object.values(OWN).map(n => n.name))
+  const upVless = sd.outbounds.filter(o => o.type === 'vless' && !ownTags.has(o.tag))
+  ok(upVless.length === 2, `上游 vless 转出 outbound（${upVless.length}）`)
+  const wsOut = upVless.find(o => o.transport && o.transport.type === 'ws')
+  ok(wsOut && wsOut.transport.path === '/ray' && wsOut.transport.headers.Host === 'example.invalid', '上游 vless+ws 转出 transport')
+  ok(wsOut && wsOut.tls && wsOut.tls.server_name === 'example.invalid', 'servername 映射到 tls.server_name')
+  const reOut = upVless.find(o => o.tls && o.tls.reality)
+  ok(reOut && reOut.tls.reality.public_key === '-PLACEHOLDERPUBKEY000000000000000000000000', 'reality-opts 转出 public_key')
+  ok(reOut && reOut.tls.reality.short_id === '0123456789abcdef', 'reality-opts 转出 short_id')
+  ok(reOut && reOut.flow === 'xtls-rprx-vision', 'vision flow 带过去')
+  const vmOut = sd.outbounds.find(o => o.type === 'vmess')
+  ok(vmOut && vmOut.tls && vmOut.tls.enabled && vmOut.transport && vmOut.transport.type === 'ws', 'vmess 带上 tls 与 ws transport')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -38,5 +38,8 @@ proxies:
     - { name: 法国|AI推荐, type: anytls, server: fr.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
     - { name: '加拿大 IPv6', server: '2001:db8:4::1', port: 5021, skip-cert-verify: true, sni: example.invalid, type: hysteria2, password: 11111111-2222-3333-4444-555555555555 }
     - { name: 加拿大|AI推荐, type: anytls, server: ca.example.invalid, port: 6001, password: 11111111-2222-3333-4444-555555555555, udp: true, sni: example.invalid, skip-cert-verify: true, client-fingerprint: chrome }
+    - { name: 日本-vless-ws, type: vless, server: v4-jp-ws.example.invalid, port: 443, uuid: 11111111-2222-3333-4444-555555555555, udp: true, tls: true, servername: example.invalid, client-fingerprint: chrome, network: ws, ws-opts: { path: /ray, headers: { Host: example.invalid } } }
+    - { name: 美国-vless-reality, type: vless, server: us-reality.example.invalid, port: 443, uuid: 11111111-2222-3333-4444-555555555555, udp: true, tls: true, flow: xtls-rprx-vision, servername: example.invalid, client-fingerprint: chrome, reality-opts: { public-key: '-PLACEHOLDERPUBKEY000000000000000000000000', short-id: 0123456789abcdef } }
+    - { name: 香港-vmess-ws, type: vmess, server: hk-vmess.example.invalid, port: 443, uuid: 11111111-2222-3333-4444-555555555555, alterId: 0, cipher: auto, udp: true, tls: true, servername: example.invalid, network: ws, ws-opts: { path: /vm, headers: { Host: example.invalid } } }
     - { name: 示例机场, type: select, proxies: ['♻️ 自动选择', 2x专线-日本-1, 2x专线-香港-1], url: 'http://www.example.invalid/', interval: 1800 }
     - { name: '♻️ 自动选择', type: url-test, proxies: [2x专线-日本-1, 2x专线-香港-1], url: 'http://www.example.invalid/', interval: 1800 }

@@ -37,6 +37,16 @@ async function loadOwn() {
 }
 
 const UPSTREAM_UA = 'clash-verge/v2.0.0'
+// 机场按 UA 决定给什么格式，也有干脆按 UA 拒绝的。一种身份被挡住不代表这条链接
+// 是死的 —— 依次换几种主流客户端再试，比当场判死刑靠谱。顺序即优先级：
+// 前面的能拿到带分流规则的 YAML，后面的通常只给 base64 节点列表，够用但信息少。
+const UPSTREAM_UAS = [
+  UPSTREAM_UA,
+  'ClashforWindows/0.19.23',
+  'v2rayN/6.45',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  ''      // 不带 UA
+]
 const FRESH_TTL = 3600      // 1h 内直接用缓存
 const STALE_TTL = 604800    // 缓存保留 7d，上游挂了拿它兜底
 
@@ -612,6 +622,264 @@ function parseProxyLine(line) {
   return obj
 }
 
+// ---------- 分享链接 / 块式 YAML → Clash 节点 ----------
+// 机场按 UA 给的格式天差地别：clash UA 给 YAML（有的单行 flow、有的块式缩进），
+// 浏览器与 v2rayN UA 常给 base64 分享链接列表。三条路最终都落到同一种 kv 形状
+// （键名用 Clash proxy 的字段名），下游 genClash / toSB / shareLink 才不用各认一套。
+
+// flow 写法里以 - ? : 等开头、或含逗号花括号的值必须加引号，否则 YAML 解析器
+// 会把它当成别的结构 —— reality 的 public-key 就常以 '-' 开头。机场原样给的
+// YAML 自己带了引号，我们从分享链接造 kv 时得自己补。
+function flowVal(s) {
+  const t = String(s)
+  if (t === '') return "''"
+  if (/^['"]/.test(t)) return t                                  // 已经带引号
+  if (/^[-?:,[\]{}#&*!|>%@`]|[,{}[\]]|:\s|\s#/.test(t)) return `'${t.replace(/'/g, "''")}'`
+  return t
+}
+
+// 对象 → YAML flow 映射字符串，嵌套递归。空对象返回 '' 表示该字段不写。
+function nestFlow(o) {
+  const parts = []
+  for (const [k, v] of Object.entries(o)) {
+    if (v === undefined || v === null || v === '') continue
+    const s = (typeof v === 'object') ? nestFlow(v) : flowVal(v)
+    if (s !== '') parts.push(`${k}: ${s}`)
+  }
+  return parts.length ? `{ ${parts.join(', ')} }` : ''
+}
+
+// nestFlow 的逆运算：`{ path: /x, headers: { Host: y } }` → 对象。
+// 三种入站格式都把嵌套值归一成了这种 flow 写法，这里是唯一的反向出口。
+function parseFlow(s) {
+  const t = String(s || '').trim()
+  if (!t.startsWith('{') || !t.endsWith('}')) return {}
+  const o = {}
+  for (const pair of splitTop(t.slice(1, -1))) {
+    const i = pair.indexOf(':')
+    if (i < 0) continue
+    const k = pair.slice(0, i).trim()
+    if (!k) continue
+    const v = pair.slice(i + 1).trim()
+    o[k] = v.startsWith('{') ? parseFlow(v) : unquote(v)
+  }
+  return o
+}
+
+// URL.hostname 对 IPv6 会带方括号，Clash 的 server 字段要的是裸地址
+function bareHost(h) {
+  h = String(h || '')
+  return (h.startsWith('[') && h.endsWith(']')) ? h.slice(1, -1) : h
+}
+
+// 分享链接的传输层参数 → Clash 的 network 与各 *-opts
+function shareTransport(kv, q) {
+  const net = String(q.type || q.net || 'tcp').toLowerCase()
+  const path = q.path ? decodeURIComponent(q.path) : ''
+  if (net === 'ws') {
+    kv.network = 'ws'
+    kv['ws-opts'] = nestFlow({ path: path || '/', headers: q.host ? { Host: q.host } : '' })
+  } else if (net === 'grpc') {
+    kv.network = 'grpc'
+    const g = nestFlow({ 'grpc-service-name': q.serviceName || q.servicename || '' })
+    if (g) kv['grpc-opts'] = g
+  } else if (net === 'h2' || net === 'http') {
+    kv.network = 'h2'
+    // h2-opts.host 是列表，flow 写法里要带方括号
+    const h = nestFlow({ path: path || '', host: q.host ? `[${q.host}]` : '' })
+    if (h) kv['h2-opts'] = h
+  } else if (net !== 'tcp' && net !== 'raw' && net !== 'none' && net !== '') {
+    kv.network = net          // xhttp / quic 等，原样带过去，别丢
+  }
+}
+
+// TLS 相关参数三家共用（vless / trojan / 部分 vmess）
+function shareTLS(kv, q, sniKey) {
+  const sec = String(q.security || q.tls || '').toLowerCase()
+  if (sec && sec !== 'none') kv.tls = 'true'
+  if (q.sni || q.peer) kv[sniKey] = q.sni || q.peer
+  if (q.fp) kv['client-fingerprint'] = q.fp
+  if (q.alpn) kv.alpn = `[${decodeURIComponent(q.alpn).split(',').join(', ')}]`
+  if (q.insecure === '1' || q.insecure === 'true' || q.allowInsecure === '1' || q.allowInsecure === 'true')
+    kv['skip-cert-verify'] = 'true'
+  if (sec === 'reality') {
+    const r = nestFlow({ 'public-key': q.pbk || '', 'short-id': q.sid || '' })
+    if (r) kv['reality-opts'] = r
+  }
+}
+
+// ss:// 有两种写法：SIP002 的 base64(method:password)@host:port，
+// 以及老客户端的整串 base64(method:password@host:port)
+function parseSSBody(body) {
+  let s = body
+  if (!s.includes('@')) s = b64decode(s)
+  const at = s.lastIndexOf('@')
+  if (at < 0) return null
+  let cred = s.slice(0, at)
+  const hostport = s.slice(at + 1).replace(/\/.*$/, '')
+  if (!cred.includes(':')) cred = b64decode(cred)
+  const ci = cred.indexOf(':')
+  if (ci < 0) return null
+  const pi = hostport.lastIndexOf(':')
+  if (pi < 0) return null
+  return {
+    cipher: cred.slice(0, ci), password: cred.slice(ci + 1),
+    server: bareHost(hostport.slice(0, pi)), port: hostport.slice(pi + 1)
+  }
+}
+
+// 一行分享链接 → 与 parseProxyLine 同形状的 kv；认不出返回 null
+function parseShareLine(line) {
+  const raw = String(line).trim()
+  const si = raw.indexOf('://')
+  if (si < 1) return null
+  const scheme = raw.slice(0, si).toLowerCase()
+  const kv = {}
+  let tag = ''
+
+  if (scheme === 'vmess') {
+    // 绝大多数是 base64(JSON)；少数新客户端写成 URL 形式，交给下面的通用分支
+    const body = raw.slice(si + 3)
+    if (!body.includes('@')) {
+      let j = null
+      try { j = JSON.parse(b64decode(body.split('#')[0])) } catch (e) { return null }
+      if (!j || !j.add || !j.port) return null
+      tag = String(j.ps || j.remark || '')
+      Object.assign(kv, {
+        type: 'vmess', server: bareHost(j.add), port: String(j.port),
+        uuid: String(j.id || ''), alterId: String(j.aid === undefined ? 0 : j.aid),
+        cipher: String(j.scy || j.security || 'auto'), udp: 'true'
+      })
+      if (String(j.tls || '') !== '') kv.tls = 'true'
+      if (j.sni) kv.servername = j.sni
+      if (j.fp) kv['client-fingerprint'] = j.fp
+      shareTransport(kv, { type: j.net, path: j.path ? encodeURIComponent(j.path) : '', host: j.host, serviceName: j.path })
+      if (!kv.uuid) return null
+      kv.name = tag || `${kv.server}:${kv.port}`
+      kv._name = kv.name
+      return kv
+    }
+  }
+
+  if (scheme === 'ss') {
+    const hi = raw.indexOf('#')
+    const body = raw.slice(si + 3, hi < 0 ? undefined : hi).split('?')[0]
+    const p = parseSSBody(body)
+    if (!p || !p.server || !p.port) return null
+    tag = hi < 0 ? '' : safeDecode(raw.slice(hi + 1))
+    Object.assign(kv, { type: 'ss', server: p.server, port: p.port, cipher: p.cipher, password: p.password, udp: 'true' })
+    kv.name = tag || `${kv.server}:${kv.port}`
+    kv._name = kv.name
+    return kv
+  }
+
+  let u = null
+  try { u = new URL(raw) } catch (e) { return null }
+  const host = bareHost(u.hostname), port = u.port
+  if (!host || !port) return null
+  const q = {}
+  u.searchParams.forEach((v, k) => { q[k] = v })
+  tag = safeDecode(u.hash.slice(1))
+  const user = safeDecode(u.username)
+
+  if (scheme === 'vless') {
+    if (!user) return null
+    Object.assign(kv, { type: 'vless', server: host, port, uuid: user, udp: 'true' })
+    if (q.flow) kv.flow = q.flow
+    shareTLS(kv, q, 'servername')
+    shareTransport(kv, q)
+  } else if (scheme === 'vmess') {
+    if (!user) return null
+    Object.assign(kv, { type: 'vmess', server: host, port, uuid: user, alterId: q.aid || '0', cipher: q.scy || 'auto', udp: 'true' })
+    shareTLS(kv, q, 'servername')
+    shareTransport(kv, q)
+  } else if (scheme === 'trojan') {
+    if (!user) return null
+    Object.assign(kv, { type: 'trojan', server: host, port, password: user, udp: 'true' })
+    shareTLS(kv, q, 'sni')
+    shareTransport(kv, q)
+  } else if (scheme === 'hysteria2' || scheme === 'hy2') {
+    Object.assign(kv, { type: 'hysteria2', server: host, port, password: user || safeDecode(u.password) })
+    if (q.sni || q.peer) kv.sni = q.sni || q.peer
+    if (q.insecure === '1' || q.insecure === 'true') kv['skip-cert-verify'] = 'true'
+    if (q.obfs) { kv.obfs = q.obfs; if (q['obfs-password']) kv['obfs-password'] = q['obfs-password'] }
+    if (q.mport) kv.ports = q.mport         // 端口跳跃
+  } else if (scheme === 'tuic') {
+    Object.assign(kv, { type: 'tuic', server: host, port, uuid: user, password: safeDecode(u.password), udp: 'true' })
+    if (q.sni) kv.sni = q.sni
+    if (q.congestion_control) kv['congestion-controller'] = q.congestion_control
+    if (q.alpn) kv.alpn = `[${decodeURIComponent(q.alpn).split(',').join(', ')}]`
+    if (q.allow_insecure === '1' || q.insecure === '1') kv['skip-cert-verify'] = 'true'
+  } else if (scheme === 'anytls') {
+    Object.assign(kv, { type: 'anytls', server: host, port, password: user, udp: 'true' })
+    if (q.sni) kv.sni = q.sni
+    if (q.insecure === '1' || q.allowInsecure === '1') kv['skip-cert-verify'] = 'true'
+  } else return null
+
+  kv.name = tag || `${host}:${port}`
+  kv._name = kv.name
+  return kv
+}
+
+// 分享链接里的 name 常有非法转义，decodeURIComponent 会整条抛掉
+function safeDecode(s) {
+  try { return decodeURIComponent(String(s || '')) } catch (e) { return String(s || '') }
+}
+
+const indentOf = l => l.length - l.replace(/^[ \t]+/, '').length
+
+// 缩进块 → flow 字符串。块式 YAML 里 ws-opts / reality-opts 是多层缩进，
+// 收成 flow 后与单行格式的值形状一致，下游读法就只有一种。
+function collectFlow(lines, i, base) {
+  const parts = []
+  let j = i
+  while (j < lines.length) {
+    const l = lines[j]
+    if (!l.trim()) { j++; continue }
+    const ind = indentOf(l)
+    if (ind <= base) break
+    const t = l.trim()
+    const ci = t.indexOf(':')
+    if (ci < 0) { j++; continue }
+    const k = t.slice(0, ci).trim(), v = t.slice(ci + 1).trim()
+    if (v) { parts.push(`${k}: ${v}`); j++ }
+    else {
+      const sub = collectFlow(lines, j + 1, ind)
+      if (sub.flow) parts.push(`${k}: ${sub.flow}`)
+      j = sub.next
+    }
+  }
+  return { flow: parts.length ? `{ ${parts.join(', ')} }` : '', next: j }
+}
+
+// 块式节点：`- name: x` 起头，后续更深缩进的行都属于它。v2board 系常见这种。
+function parseBlockNode(lines, i) {
+  const head = lines[i]
+  const base = indentOf(head)
+  const first = head.replace(/^[ \t]*-[ \t]*/, '')
+  const fi = first.indexOf(':')
+  if (fi < 0) return { node: null, next: i + 1 }
+  const obj = {}
+  obj[first.slice(0, fi).trim()] = first.slice(fi + 1).trim()
+  let j = i + 1
+  while (j < lines.length) {
+    const l = lines[j]
+    if (!l.trim()) { j++; continue }
+    const ind = indentOf(l)
+    if (ind <= base) break                       // 同级或更浅 → 本块结束
+    const t = l.trim()
+    if (t.startsWith('- ')) break                // 下一个节点
+    const ci = t.indexOf(':')
+    if (ci < 0) { j++; continue }
+    const k = t.slice(0, ci).trim(), v = t.slice(ci + 1).trim()
+    if (v) { obj[k] = v; j++ }
+    else { const sub = collectFlow(lines, j + 1, ind); if (sub.flow) obj[k] = sub.flow; j = sub.next }
+  }
+  if (!obj.name || !obj.type) return { node: null, next: j }
+  obj._name = unquote(obj.name)
+  return { node: obj, next: j }
+}
+
 // ---------- 机场元信息解析（流量 / 到期）----------
 // 各家机场给法不一：多数走 Subscription-Userinfo 头，也有只把信息塞进节点名当公告的，
 // 还有两者都给但单位、日期格式各异。这里三路都认，头优先、公告兜底。
@@ -719,41 +987,151 @@ function mergeMeta(head, note) {
   return (m.total || m.expire) ? m : null
 }
 
+// 一条已解析出的 kv 该收进节点还是公告
+function takeNode(p, nodes, notes) {
+  if (/^(select|url-test|fallback|load-balance|relay)$/.test(unquote(p.type || ''))) return   // proxy-group
+  // 公告条目不是节点，但流量/到期常藏在里面，先留作兜底解析
+  if (JUNK.test(p._name) || unquote(p.server || '') === '127.0.0.1') { notes.push(p._name); return }
+  nodes.push(p)
+}
+
 // 把订阅原文切成「节点行」与「公告行」。正式拉取与诊断共用，
 // 否则两边各写一遍，诊断说能解析、实际拉取却是空的，白折腾。
+//
+// 三种入站格式在这里汇合：单行 flow YAML、块式 YAML、分享链接列表。
+// 机场按 UA 给哪种是它的自由，我们不能只认一种 —— 只认一种的后果是
+// 换个 UA 重试、粘贴导入这些退路全都走不通。
 function splitFeed(text) {
   const nodes = [], notes = []
-  for (const line of text.split('\n')) {
-    const p = parseProxyLine(line)
-    if (!p) {
-      // 公告不一定是节点行。有的机场写成 YAML 注释（# 剩余流量：xxx），
-      // 有的直接是裸文本行 —— 这些 parseProxyLine 一律返回 null，
-      // 以前连同真正的垃圾行一起丢掉，用量与到期就此丢失。
-      const t = line.replace(/^\s*[#;]+\s*/, '').replace(/^\s*-\s*/, '').trim()
-      if (t && t.length < 120 && JUNK.test(t)) notes.push(t)
+  const lines = text.split('\n')
+  let inProxies = false, seenYamlKey = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    // 顶层键：proxies 段之外的 YAML 段落里没有节点。
+    // 负向断言不能省 —— `vless://…` 这样的分享链接同样是「字母 + 冒号」开头，
+    // 少了它整份 base64 订阅会被逐行当成 YAML 段名跳过，一个节点都解析不出来。
+    if (/^[a-zA-Z"'][\w"'-]*\s*:(?!\/\/)/.test(line)) {
+      seenYamlKey = true
+      // rules 通常有上万行，既没有节点也没有公告。免费版 Workers 单次请求
+      // 只有 10ms CPU，白扫这一段就能把预算耗光。
+      if (/^(rules|rule-providers|proxy-providers|sub-rules|listeners)\s*:/.test(line)) break
+      inProxies = /^proxies\s*:/.test(line)
+      i++
       continue
     }
-    if (/^(select|url-test|fallback|load-balance|relay)$/.test(p.type)) continue   // proxy-group
-    // 公告条目不是节点，但流量/到期常藏在里面，先留作兜底解析
-    if (JUNK.test(p._name) || unquote(p.server || '') === '127.0.0.1') { notes.push(p._name); continue }
-    nodes.push(p)
+    const t0 = line.trim()
+    // 分享链接列表：整份订阅可能一行一个，也可能混在 YAML 注释里
+    if (t0.includes('://') && !/^[#;]/.test(t0)) {
+      const s = parseShareLine(t0)
+      if (s) { takeNode(s, nodes, notes); i++; continue }
+    }
+    if (inProxies || !seenYamlKey) {
+      const p = parseProxyLine(line)
+      if (p) { takeNode(p, nodes, notes); i++; continue }
+      // 块式：`- name: x` 起头，字段分散在后续缩进行里
+      if (/^[ \t]*-[ \t]*[\w"']/.test(line)) {
+        const b = parseBlockNode(lines, i)
+        if (b.node) { takeNode(b.node, nodes, notes); i = b.next; continue }
+        if (b.next > i + 1) { i = b.next; continue }   // 是个块但缺 name/type，整块跳过
+      }
+    }
+    // 公告不一定是节点行。有的机场写成 YAML 注释（# 剩余流量：xxx），
+    // 有的直接是裸文本行 —— 这些 parseProxyLine 一律返回 null，
+    // 以前连同真正的垃圾行一起丢掉，用量与到期就此丢失。
+    const t = line.replace(/^\s*[#;]+\s*/, '').replace(/^\s*-\s*/, '').trim()
+    if (t && t.length < 120 && JUNK.test(t)) notes.push(t)
+    i++
   }
   return { nodes, notes }
 }
 
-// 拉一个机场，返回原始节点（未重命名）与订阅元信息
-async function fetchUpstream(u) {
-  const r = await fetch(u.url, { headers: { 'User-Agent': UPSTREAM_UA }, cf: { cacheTtl: 0 } })
-  if (!r.ok) throw new Error(`HTTP ${r.status}`)
-  const head = parseUserinfo(r.headers.get('subscription-userinfo'))
-  const raw = await r.text()
+// 单次拉取。只带一个 User-Agent 的裸请求在不少 WAF 眼里就是脚本，
+// 常见头补齐能少挨一部分拦截。Accept-Encoding 不设 —— Workers 平台自己管压缩，
+// 手工指定会被忽略。
+async function fetchRaw(url, ua) {
+  const headers = { 'Accept': '*/*', 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }
+  if (ua) headers['User-Agent'] = ua
+  const opt = { headers, redirect: 'follow', cf: { cacheTtl: 0 } }
+  // 机场超时不能拖死整个请求：Workers 免费版壁钟也有限
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opt.signal = AbortSignal.timeout(15000)
+  return await fetch(url, opt)
+}
+
+// 诊断用：这份原文是什么格式。判断顺序要先看解码后的内容，
+// 否则纯 base64 的 Clash YAML 会被认成分享链接列表。
+function feedFormat(raw, decoded) {
+  return /^\s*(proxies:|port:|mixed-port:|mode:)/m.test(decoded) ? 'Clash YAML'
+       : /"outbounds"\s*:/.test(decoded) ? 'sing-box JSON'
+       : looksBase64(raw) ? 'base64 分享链接'
+       : /:\/\//.test(decoded) ? '明文分享链接' : '未识别'
+}
+
+// 订阅原文 → 节点与元信息。拉取与粘贴导入共用这一套，
+// 否则两边解析能力不一致，粘进来的东西反而解不出来。
+function feedParse(raw, userinfoHeader, u) {
   const text = looksBase64(raw) ? b64decode(raw) : raw   // 有的机场无视 UA 直接吐 base64
   const { nodes, notes } = splitFeed(text)
   const out = nodes.map(p => ({
     up: u.id, upName: u.name, raw: p._name, kv: p,
     region: regionOf(p._name)
   }))
-  return { nodes: out, info: mergeMeta(head, parseNotes(notes)) }
+  return { nodes: out, info: mergeMeta(parseUserinfo(userinfoHeader), parseNotes(notes)) }
+}
+
+// 拦截页的正文往往写着到底是谁拦的（Cloudflare 的 1020、机场自己的限流提示）。
+// 只把状态码抛出去的话，用户拿到一个光秃秃的 403，无从判断下一步该做什么。
+async function errBody(r) {
+  try {
+    const t = await r.text()
+    return scrub(t.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 160)
+  } catch (e) { return '' }
+}
+
+function triesMsg(tries) {
+  if (!tries.length) return '未发起请求'
+  if (tries.every(t => t.status >= 200 && t.status < 300))
+    return `换了 ${tries.length} 种客户端身份都能访问，但都没解析出节点`
+  const seen = new Set(), parts = []
+  for (const t of tries) {
+    const k = t.err || ('HTTP ' + t.status)
+    if (seen.has(k)) continue
+    seen.add(k)
+    parts.push(t.body ? `${k}（${t.body}）` : k)
+  }
+  return parts.join('；')
+}
+
+// 人工粘贴进来的订阅原文。和网络拉取共用 feedParse —— 两边各写一套解析的话，
+// 迟早出现「诊断说能解析、粘进来却是空的」这种自相矛盾。
+// 少的只是 subscription-userinfo 响应头，用量与到期只能从公告文本里捡。
+function parsePasted(text, u) {
+  const t = String(text || '').trim()
+  if (!t) return { err: '粘贴的内容是空的' }
+  const got = feedParse(t, null, u)
+  if (!got.nodes.length)
+    return { err: '粘贴的内容里没解析出任何节点 —— 确认复制的是订阅内容本身（一大段 base64 或 YAML），不是机场的网页' }
+  return { got }
+}
+
+// 拉一个机场，返回原始节点（未重命名）与订阅元信息。
+// 逐个 UA 试，取第一个「能访问且真的解析出节点」的结果 —— 只看 2xx 不够，
+// 机场对不同 UA 回的格式不同，有的那一份里根本没有节点。
+async function fetchUpstream(u) {
+  // 粘贴导入的源没有可重拉的链接，平时靠快照供节点。快照万一没了也别去 fetch 空串。
+  if (!/^https?:\/\//.test(u.url || '')) throw new Error('这个源没有订阅链接，只有粘贴导入的快照')
+  const tries = []
+  for (const ua of UPSTREAM_UAS) {
+    let r = null
+    try { r = await fetchRaw(u.url, ua) }
+    catch (e) { tries.push({ ua, err: String(e && e.message || e) }); continue }
+    if (!r.ok) { tries.push({ ua, status: r.status, body: await errBody(r) }); continue }
+    const raw = await r.text()
+    const got = feedParse(raw, r.headers.get('subscription-userinfo'), u)
+    tries.push({ ua, status: r.status, n: got.nodes.length })
+    if (got.nodes.length) return { ...got, tries }
+  }
+  throw new Error(triesMsg(tries))
 }
 
 // 每个源单独留一份最后成功拉取的快照。
@@ -978,11 +1356,12 @@ async function apiRoute(req, url, event) {
     const ups = await kvGet('upstreams', [])
     let added = null, addedN = 0
     if (body.act === 'add') {
-      if (!/^https?:\/\//.test(body.url || '')) return json({ ok: false, msg: '链接需以 http(s):// 开头' }, 400)
+      const pasted = String(body.text || '').trim()
+      if (!pasted && !/^https?:\/\//.test(body.url || '')) return json({ ok: false, msg: '链接需以 http(s):// 开头' }, 400)
       // 没填名称时从链接里捡：多数机场的订阅 URL 自带 ?name= 或 ?remarks=
       let nm = String(body.name || '').trim()
       if (!nm) {
-        const q = (body.url.split('?')[1] || '')
+        const q = (String(body.url || '').split('?')[1] || '')
         for (const seg of q.split('&')) {
           const [k, v] = seg.split('=')
           if (/^(name|remarks|title|flag)$/i.test(k || '') && v) {
@@ -991,15 +1370,23 @@ async function apiRoute(req, url, event) {
           }
         }
       }
-      added = { id: randHex(6), name: nm || '未命名机场', url: body.url, enabled: true }
-      // 先试拉一次再落库。死链接静默收下的话，用户以为加成功了，
-      // 实际每次聚合都白等它超时，还得自己去猜哪一条坏了。
-      if (!body.force) {
+      added = { id: randHex(6), name: nm || '未命名机场', url: String(body.url || ''), enabled: true }
+      if (pasted) {
+        // 机场挡住 Worker（403/1020）时的退路：内容由浏览器取、人工贴进来。
+        // 浏览器是从用户自己的网络访问机场的，不经过我们这边的出口。
+        const r = parsePasted(pasted, added)
+        if (r.err) return json({ ok: false, msg: r.err }, 400)
+        added.auto = false          // 内容是手工给的，没有能自动重拉的来源
+        addedN = r.got.nodes.length
+        await saveSnap(added.id, r.got, event)
+      } else if (!body.force) {
+        // 先试拉一次再落库。死链接静默收下的话，用户以为加成功了，
+        // 实际每次聚合都白等它超时，还得自己去猜哪一条坏了。
         let probe = null, err = ''
         try { probe = await fetchUpstream(added) }
         catch (e) { err = String(e && e.message || e) }
-        if (err) return json({ ok: false, msg: '拉取失败：' + err, canForce: true }, 400)
-        if (!probe.nodes.length) return json({ ok: false, msg: '链接能访问，但没解析出任何节点', canForce: true }, 400)
+        if (err) return json({ ok: false, msg: '拉取失败：' + err, canForce: true, canPaste: true }, 400)
+        if (!probe.nodes.length) return json({ ok: false, msg: '链接能访问，但没解析出任何节点', canForce: true, canPaste: true }, 400)
         addedN = probe.nodes.length   // 只回给前端做提示，不落库
         // 立刻存快照：一次性链接就指望这一下，过几分钟再拉就是 403 了
         await saveSnap(added.id, probe, event)
@@ -1019,7 +1406,16 @@ async function apiRoute(req, url, event) {
       if (!u) return json({ ok: false, msg: '订阅源不存在' }, 404)
       if (body.name !== undefined) u.name = String(body.name).trim().slice(0, 30) || u.name
       if (body.auto !== undefined) u.auto = !!body.auto
-      if (body.url && body.url !== u.url) {
+      const pasted = String(body.text || '').trim()
+      if (pasted) {
+        // 粘贴优先于换链接：既然内容已经在手上，就不必再赌一次能不能拉通
+        const r = parsePasted(pasted, u)
+        if (r.err) return json({ ok: false, msg: r.err }, 400)
+        if (body.url && /^https?:\/\//.test(body.url)) u.url = body.url
+        u.auto = false
+        addedN = r.got.nodes.length
+        await saveSnap(u.id, r.got, event)
+      } else if (body.url && body.url !== u.url) {
         if (!/^https?:\/\//.test(body.url)) return json({ ok: false, msg: '链接需以 http(s):// 开头' }, 400)
         // 换链接就立刻拉一次并刷新快照。一次性链接的整个使用方式就是
         // 「去机场复制新链接 → 贴进来 → 趁有效期内抓一份快照」。
@@ -1027,8 +1423,8 @@ async function apiRoute(req, url, event) {
         try { probe = await fetchUpstream({ ...u, url: body.url }) }
         catch (e) { err = String(e && e.message || e) }
         if (!body.force) {
-          if (err) return json({ ok: false, msg: '新链接拉取失败：' + err, canForce: true }, 400)
-          if (!probe.nodes.length) return json({ ok: false, msg: '新链接没解析出任何节点', canForce: true }, 400)
+          if (err) return json({ ok: false, msg: '新链接拉取失败：' + err, canForce: true, canPaste: true }, 400)
+          if (!probe.nodes.length) return json({ ok: false, msg: '新链接没解析出任何节点', canForce: true, canPaste: true }, 400)
         }
         u.url = body.url
         if (probe && probe.nodes.length) { await saveSnap(u.id, probe, event); addedN = probe.nodes.length }
@@ -1049,32 +1445,38 @@ async function apiRoute(req, url, event) {
     const { id } = await req.json().catch(() => ({}))
     const u = (await kvGet('upstreams', [])).find(x => x.id === id)
     if (!u) return json({ ok: false, msg: '订阅源不存在' }, 404)
-    try {
-      const r = await fetch(u.url, { headers: { 'User-Agent': UPSTREAM_UA }, cf: { cacheTtl: 0 } })
+    const snap = await kvGet('snap:' + id, null)
+    const snapInfo = snap && snap.nodes ? { at: snap.at, n: snap.nodes.length } : null
+    // 每种客户端身份都试一遍并把结果摊开：机场是拒绝了我们，还是给了一份
+    // 我们解析不了的格式，这两件事在 UI 上长得一样，不摊开就只能靠猜。
+    const tries = []
+    let win = null
+    for (const ua of UPSTREAM_UAS) {
+      let r = null
+      try { r = await fetchRaw(u.url, ua) }
+      catch (e) { tries.push({ ua, err: String(e && e.message || e) }); continue }
+      if (!r.ok) { tries.push({ ua, status: r.status, body: await errBody(r) }); continue }
       const raw = await r.text()
-      const hdrs = {}
-      for (const k of ['subscription-userinfo', 'content-type', 'content-disposition', 'profile-update-interval', 'profile-web-page-url'])
-        if (r.headers.get(k)) hdrs[k] = r.headers.get(k)
-
       const decoded = looksBase64(raw) ? b64decode(raw) : raw
-      const fmt = /^\s*(proxies:|port:|mixed-port:|mode:)/m.test(decoded) ? 'Clash YAML'
-                : /"outbounds"\s*:/.test(decoded) ? 'sing-box JSON'
-                : looksBase64(raw) ? 'base64 分享链接'
-                : /:\/\//.test(decoded) ? '明文分享链接' : '未识别'
-
       const { nodes, notes } = splitFeed(decoded)
-      const head = parseUserinfo(r.headers.get('subscription-userinfo'))
-      const note = parseNotes(notes)
-      return json({
-        ok: true, name: u.name, http: r.status, bytes: raw.length, fmt,
-        headers: hdrs, hasUserinfo: !!r.headers.get('subscription-userinfo'),
-        nodes: nodes.length, notes, head, note, meta: mergeMeta(head, note),
-        // 前若干行原文，用于识别没见过的格式；顺带抹掉密钥字段
-        sample: decoded.split('\n').filter(l => l.trim()).slice(0, 14).map(scrub)
-      })
-    } catch (e) {
-      return json({ ok: true, name: u.name, http: 0, err: String(e && e.message || e) })
+      tries.push({ ua, status: r.status, bytes: raw.length, fmt: feedFormat(raw, decoded), n: nodes.length })
+      if (nodes.length) { win = { r, raw, decoded, nodes, notes, ua }; break }
     }
+    if (!win) return json({ ok: true, name: u.name, http: 0, tries, snap: snapInfo, err: triesMsg(tries) })
+
+    const hdrs = {}
+    for (const k of ['subscription-userinfo', 'content-type', 'content-disposition', 'profile-update-interval', 'profile-web-page-url'])
+      if (win.r.headers.get(k)) hdrs[k] = win.r.headers.get(k)
+    const head = parseUserinfo(win.r.headers.get('subscription-userinfo'))
+    const note = parseNotes(win.notes)
+    return json({
+      ok: true, name: u.name, http: win.r.status, bytes: win.raw.length,
+      fmt: feedFormat(win.raw, win.decoded), ua: win.ua, tries, snap: snapInfo,
+      headers: hdrs, hasUserinfo: !!win.r.headers.get('subscription-userinfo'),
+      nodes: win.nodes.length, notes: win.notes, head, note, meta: mergeMeta(head, note),
+      // 前若干行原文，用于识别没见过的格式；顺带抹掉密钥字段
+      sample: win.decoded.split('\n').filter(l => l.trim()).slice(0, 14).map(scrub)
+    })
   }
 
   if (p === '/api/node' && req.method === 'POST') {
@@ -1559,26 +1961,81 @@ function genClash(blacklist, up, policies, lib, own, st) {
   ].filter(x => x !== '').join('\n')
 }
 
-// Clash 节点 → sing-box outbound
+// Clash 的 network + *-opts → sing-box transport。tcp 返回 null，走 sing-box 默认。
+function sbTransport(net, v) {
+  if (net === 'ws') {
+    const w = parseFlow(v('ws-opts'))
+    const t = { type: 'ws', path: w.path || '/' }
+    if (w.headers && w.headers.Host) t.headers = { Host: w.headers.Host }
+    return t
+  }
+  if (net === 'grpc') return { type: 'grpc', service_name: parseFlow(v('grpc-opts'))['grpc-service-name'] || '' }
+  if (net === 'h2') {
+    const h = parseFlow(v('h2-opts'))
+    const t = { type: 'http' }
+    if (h.path) t.path = h.path
+    if (h.host) t.host = String(h.host).replace(/^\[|\]$/g, '').split(',').map(s => s.trim()).filter(Boolean)
+    return t
+  }
+  return null
+}
+
+// Clash 节点 → sing-box outbound。认不出的协议返回 null，
+// 调用方必须连带把这个节点从所有分组里剔掉（见 genSB 开头）。
 function toSB(n) {
   const v = k => n.kv[k] === undefined ? undefined : unquote(n.kv[k])
-  const tls = { enabled: true, insecure: v('skip-cert-verify') === 'true' }
-  if (v('sni')) tls.server_name = v('sni')
-  if (v('client-fingerprint')) tls.utls = { enabled: true, fingerprint: v('client-fingerprint') }
-
-  const base = { tag: n.name, server: v('server'), server_port: parseInt(v('port'), 10) }
   const t = v('type')
+  const base = { tag: n.name, server: v('server'), server_port: parseInt(v('port'), 10) }
+
+  // sni 与 servername 两个字段名都要认：Clash 里 trojan/hysteria2 写 sni，
+  // vless 写 servername，机场给哪个取决于它用的是哪个生成器
+  const sni = v('sni') || v('servername')
+  const ro = parseFlow(v('reality-opts'))
+  const tls = { enabled: true, insecure: v('skip-cert-verify') === 'true' }
+  if (sni) tls.server_name = sni
+  if (v('client-fingerprint')) tls.utls = { enabled: true, fingerprint: v('client-fingerprint') }
+  if (ro['public-key']) tls.reality = { enabled: true, public_key: ro['public-key'], short_id: ro['short-id'] || '' }
+  const tr = sbTransport(v('network'), v)
+
   if (t === 'anytls') return { type: 'anytls', ...base, password: v('password'), tls }
-  if (t === 'trojan') return { type: 'trojan', ...base, password: v('password'), tls }
-  if (t === 'hysteria2') return { type: 'hysteria2', ...base, password: v('password'), tls }
-  if (t === 'vmess') return { type: 'vmess', ...base, uuid: v('uuid'), security: v('cipher') || 'auto', alter_id: parseInt(v('alterId') || '0', 10) }
+  if (t === 'hysteria2') {
+    const o = { type: 'hysteria2', ...base, password: v('password'), tls }
+    if (v('obfs')) o.obfs = { type: v('obfs'), password: v('obfs-password') || '' }
+    return o
+  }
+  if (t === 'trojan') {
+    const o = { type: 'trojan', ...base, password: v('password'), tls }
+    if (tr) o.transport = tr
+    return o
+  }
+  if (t === 'vmess') {
+    // TLS 与 transport 以前都没带过。机场的 vmess 十有八九是 ws+tls，
+    // 缺了这两样 outbound 生成得出来却连不上，比直接丢掉更难排查。
+    const o = { type: 'vmess', ...base, uuid: v('uuid'), security: v('cipher') || 'auto', alter_id: parseInt(v('alterId') || '0', 10) }
+    if (v('tls') === 'true') o.tls = tls
+    if (tr) o.transport = tr
+    return o
+  }
+  if (t === 'vless') {
+    const o = { type: 'vless', ...base, uuid: v('uuid'), packet_encoding: 'xudp' }
+    if (v('flow')) o.flow = v('flow')
+    if (v('tls') === 'true' || tls.reality || sni) o.tls = tls
+    if (tr) o.transport = tr
+    return o
+  }
   if (t === 'ss') return { type: 'shadowsocks', ...base, method: v('cipher'), password: v('password') }
   return null
 }
 
 function genSB(up, policies, lib, own, st) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
-  const upOut = up.map(toSB).filter(Boolean)
+  // 转不出 outbound 的节点必须在这里就整个剔掉，后面所有分组都基于过滤后的 up。
+  // 只 filter(Boolean) 掉 outbound、却让地区组继续按全量节点取名字，
+  // 就会引用一堆不存在的 tag —— sing-box 是拒绝加载整份配置，不是跳过那几个。
+  // 少几个节点还能用，配置非法是一点都不能用。
+  const conv = up.map(n => ({ n, o: toSB(n) })).filter(x => x.o)
+  up = conv.map(x => x.n)
+  const upOut = conv.map(x => x.o)
   const ownN = Object.values(own).map(n => n.name)
   const allN = [...ownN, ...upOut.map(o => o.tag)]
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
@@ -1694,20 +2151,58 @@ function shareLink(n) {
     if (o.ports) qs.set('mport', o.ports)
     return `hysteria2://${encodeURIComponent(o.u)}@${hostPart(o.s)}:${o.p}?${qs}#${tag}`
   }
+  // 上游节点：这里是 parseShareLine 的逆运算，两边字段映射必须对得上，
+  // 否则「订阅进来能用、导出去连不上」。
   const v = k => n.kv[k] === undefined ? undefined : unquote(n.kv[k])
   const t = v('type'), host = v('server'), port = v('port'), pwd = v('password')
+  const sni = v('sni') || v('servername')
+  const net = v('network') || 'tcp'
+  const ws = parseFlow(v('ws-opts')), ro = parseFlow(v('reality-opts'))
+  const wsHost = ws.headers && ws.headers.Host
+
   const qs = new URLSearchParams()
-  if (v('sni')) qs.set('sni', v('sni'))
+  if (sni) qs.set('sni', sni)
   if (v('skip-cert-verify') === 'true') { qs.set('insecure', '1'); qs.set('allowInsecure', '1') }
+  // 传输层参数不带上，ws / grpc 节点导进客户端照样连不上
+  const addTransport = () => {
+    if (net !== 'tcp') qs.set('type', net)
+    if (net === 'ws') {
+      if (ws.path) qs.set('path', ws.path)
+      if (wsHost) qs.set('host', wsHost)
+    } else if (net === 'grpc') {
+      const g = parseFlow(v('grpc-opts'))['grpc-service-name']
+      if (g) qs.set('serviceName', g)
+    }
+  }
+
   if (t === 'anytls')    return `anytls://${encodeURIComponent(pwd)}@${hostPart(host)}:${port}?${qs}#${tag}`
-  if (t === 'trojan')    return `trojan://${encodeURIComponent(pwd)}@${hostPart(host)}:${port}?${qs}#${tag}`
-  if (t === 'hysteria2') return `hysteria2://${encodeURIComponent(pwd)}@${hostPart(host)}:${port}?${qs}#${tag}`
+  if (t === 'trojan')    { addTransport(); return `trojan://${encodeURIComponent(pwd)}@${hostPart(host)}:${port}?${qs}#${tag}` }
   if (t === 'ss')        return `ss://${b64utf8(v('cipher') + ':' + pwd)}@${hostPart(host)}:${port}#${tag}`
+  if (t === 'hysteria2') {
+    if (v('obfs')) { qs.set('obfs', v('obfs')); if (v('obfs-password')) qs.set('obfs-password', v('obfs-password')) }
+    if (v('ports')) qs.set('mport', v('ports'))      // 端口跳跃
+    return `hysteria2://${encodeURIComponent(pwd)}@${hostPart(host)}:${port}?${qs}#${tag}`
+  }
+  if (t === 'vless') {
+    if (!v('uuid')) return null
+    qs.set('encryption', 'none')
+    qs.set('security', ro['public-key'] ? 'reality' : (v('tls') === 'true' ? 'tls' : 'none'))
+    if (v('flow')) qs.set('flow', v('flow'))
+    if (v('client-fingerprint')) qs.set('fp', v('client-fingerprint'))
+    if (ro['public-key']) {
+      qs.set('pbk', ro['public-key'])
+      if (ro['short-id']) qs.set('sid', ro['short-id'])
+    }
+    addTransport()
+    return `vless://${v('uuid')}@${hostPart(host)}:${port}?${qs}#${tag}`
+  }
   if (t === 'vmess') {
+    if (!v('uuid')) return null
     return 'vmess://' + b64utf8(JSON.stringify({
       v: '2', ps: n.name, add: host, port: String(port), id: v('uuid'),
       aid: v('alterId') || '0', scy: v('cipher') || 'auto',
-      net: v('network') || 'tcp', type: 'none', host: '', path: '', tls: ''
+      net, type: 'none', host: wsHost || '', path: ws.path || '',
+      tls: v('tls') === 'true' ? 'tls' : '', sni: sni || ''
     }))
   }
   return null
@@ -2003,7 +2498,25 @@ const authed = ${authed}, inited = ${inited}
 const app = document.getElementById('app')
 const tsBox = document.getElementById('toasts')
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-const api = async (p, b) => (await fetch(p, b ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)} : {})).json()
+// 服务端并不总是回 JSON：CPU 超限时 Cloudflare 直接塞一张 1102 错误页，
+// 网关问题也是 HTML。裸 .json() 在这种时候抛 SyntaxError，把调用方的 await 链
+// 整条掐断 —— 界面上什么都不发生，用户只知道「点了没反应」。
+// 这里一律折成 {ok:false, msg}，保证任何失败都能弹出提示。
+const api = async (p, b) => {
+  let r
+  try {
+    r = await fetch(p, b ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)} : {})
+  } catch (e) {
+    return { ok:false, msg:'网络请求失败：' + (e && e.message || e) }
+  }
+  const raw = await r.text().catch(() => '')
+  try { return JSON.parse(raw) }
+  catch (e) {
+    if (r.status === 401 || r.status === 403) return { ok:false, msg:'登录已失效，请刷新页面重新登录' }
+    const hint = r.status === 500 && /exceeded|limit|1102/i.test(raw) ? '服务端超出资源限制' : '服务端返回了非 JSON 响应'
+    return { ok:false, msg:\`\${hint}（HTTP \${r.status}）\` }
+  }
+}
 const icon = (n, cls = '') => \`<svg class="ic \${cls}" viewBox="0 0 24 24" stroke-width="2"><use href="#i-\${n}"/></svg>\`
 let TAB = 'node', ST = null, POL = null, OWN = null, PRF = null, PF = '', SET = null
 
@@ -2365,7 +2878,7 @@ function upRow(u){
   return \`<div class="up src \${u.enabled===false?'off':''}" data-id="\${u.id}">
       <span class="dot"></span>
       <span class="nm">\${esc(u.name)}\${u.auto===false?'<span class="tag manual" data-tip="不参与自动刷新，固定使用快照">手动</span>':''}</span>
-      <span class="u">\${esc(u.url)}\${snapAt?\`<span class="snap">快照 \${ago(snapAt)}</span>\`:''}</span>
+      <span class="u">\${u.url ? esc(u.url) : '<span class="mute">粘贴导入 · 无链接</span>'}\${snapAt?\`<span class="snap">快照 \${ago(snapAt)}</span>\`:''}</span>
       \${upMeta((ST.meta || {})[u.id], u.id)}
       <button class="sw" data-on="\${u.enabled===false?0:1}" data-tip="\${u.enabled===false?'启用':'停用'}" onclick="upAct('toggle','\${u.id}',this)"><i></i></button>
       <button class="ib" data-tip="编辑" onclick="editUp('\${u.id}')">\${icon('edit')}</button>
@@ -2992,16 +3505,39 @@ window.resetOwn = async () => {
 }
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
+// 拉不通时的退路对话框。粘了内容就用内容，留空直接保存就是先把源加进来。
+// 两件事塞进一个弹窗，是因为用户此刻只关心一件事：怎么才能把它用上。
+const pasteBox = async (title, msg) => {
+  const html = \`<div class="fg"><label class="lb">粘贴订阅内容</label>
+    <textarea id="pt" placeholder="在浏览器里打开订阅链接 → 全选复制 → 粘到这里"></textarea>
+    <div class="hint">浏览器是从你自己的网络访问机场的，不经过本站出口，机场拦不住。
+      留空直接保存则先把这个源加进来，暂时不会有节点。</div></div>\`
+  const b = await modal({ title, desc: msg + '。', html, ok:'保存', danger:true, wide:true })
+  return b ? b.querySelector('#pt').value.trim() : null
+}
+
 window.addUp = async () => {
-  const v = await modal({ title:'添加订阅源', desc:'填入机场提供的订阅链接。保存前会先试拉一次，确认能解析出节点。', fields:[{ph:'名称，便于区分多个来源'},{ph:'https://...'}], ok:'添加' })
-  if (!v) return
-  const [name, url] = v
-  if (!url) return toast('订阅链接不能为空', true)
-  let r = await api('/api/upstreams', {act:'add', name, url})
+  const html = \`
+    <div class="fg"><label class="lb">名称</label>
+      <input id="un" placeholder="便于区分多个来源"></div>
+    <div class="fg"><label class="lb">订阅链接</label>
+      <input id="uu" placeholder="https://...">
+      <div class="hint">保存前会先试拉一次，确认能解析出节点。</div></div>
+    <div class="fg"><label class="lb">或粘贴订阅内容</label>
+      <textarea id="ut" placeholder="机场拦住本站时用这个：浏览器打开订阅链接 → 全选复制 → 粘到这里"></textarea>
+      <div class="hint">填了这里就不走网络，直接解析贴进来的内容并存成快照。</div></div>\`
+  const box = await modal({ title:'添加订阅源', html, ok:'添加', wide:true })
+  if (!box) return
+  const name = box.querySelector('#un').value.trim()
+  const url = box.querySelector('#uu').value.trim()
+  const text = box.querySelector('#ut').value.trim()
+  if (!url && !text) return toast('订阅链接和订阅内容至少要填一个', true)
+  let r = await api('/api/upstreams', {act:'add', name, url, text})
   // 试拉不通就问一句，而不是默默收下一个死链接
-  if (!r.ok && r.canForce) {
-    if (!await modal({ title:'这个链接拉不通', desc:r.msg + '。仍可先加进来之后再排查，但它不会贡献任何节点。', ok:'仍然添加', danger:true })) return
-    r = await api('/api/upstreams', {act:'add', name, url, force:1})
+  if (!r.ok && (r.canPaste || r.canForce)) {
+    const t2 = await pasteBox('这个链接拉不通', r.msg)
+    if (t2 === null) return
+    r = await api('/api/upstreams', t2 ? {act:'add', name, url, text:t2} : {act:'add', name, url, force:1})
   }
   if (!r.ok) return toast(r.msg, true)
   toast(r.up && r.up.n ? \`已添加，解析到 \${r.up.n} 个节点\` : '已添加订阅源')
@@ -3023,7 +3559,10 @@ window.editUp = async (id) => {
         {v:'1', label:'自动更新 — 每小时拉取最新节点'},
         {v:'0', label:'手动 — 只用快照，不自动拉取'}
       ], auto ? '1' : '0')}
-      <div class="hint" id="uah"></div></div>\`
+      <div class="hint" id="uah"></div></div>
+    <div class="fg"><label class="lb">或粘贴订阅内容</label>
+      <textarea id="ut" placeholder="机场拦住本站时用这个：浏览器打开订阅链接 → 全选复制 → 粘到这里"></textarea>
+      <div class="hint">填了这里就不走网络，直接用贴进来的内容刷新快照，更新方式自动转为手动。</div></div>\`
   const box = await modal({ title:'编辑订阅源', html, ok:'保存', wide:true, onMount: b => {
     bindSelect(b)
     const sync = () => {
@@ -3037,12 +3576,16 @@ window.editUp = async (id) => {
   if (!box) return
   const name = box.querySelector('#un').value.trim()
   const url = box.querySelector('#uu').value.trim()
+  const text = box.querySelector('#ut').value.trim()
   const a = selValue(box.querySelector('#ua')) === '1'
-  if (!url) return toast('订阅链接不能为空', true)
-  let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a })
-  if (!r.ok && r.canForce) {
-    if (!await modal({ title:'新链接拉不通', desc:r.msg + '。仍可保存，但在拿到能用的链接前它不会有新节点。', ok:'仍然保存', danger:true })) return
-    r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, force:1 })
+  if (!url && !text) return toast('订阅链接和订阅内容至少要填一个', true)
+  let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, text })
+  if (!r.ok && (r.canPaste || r.canForce)) {
+    const t2 = await pasteBox('新链接拉不通', r.msg)
+    if (t2 === null) return
+    r = await api('/api/upstreams', t2
+      ? { act:'edit', id, name, url, auto:a, text:t2 }
+      : { act:'edit', id, name, url, auto:a, force:1 })
   }
   if (!r.ok) return toast(r.msg, true)
   toast(r.up && r.up.n ? \`已保存，抓到 \${r.up.n} 个节点\` : '已保存')
@@ -3084,10 +3627,18 @@ window.probeUp = async (id) => {
   if (!r.ok) return toast(r.msg || '诊断失败', true)
   const row = (k, v) => \`<div class="up" style="grid-template-columns:104px minmax(0,1fr)">
     <span class="nm">\${k}</span><span class="u" style="white-space:pre-wrap">\${esc(String(v))}</span></div>\`
+  // 每种客户端身份的结果逐条列出：机场拒绝我们、还是给了解析不了的格式，一眼分得清
+  const uaName = t => t.ua || '（不带 UA）'
+  const tryLine = t => t.err ? \`\${uaName(t)} → 请求失败：\${t.err}\`
+    : t.status < 200 || t.status >= 300 ? \`\${uaName(t)} → HTTP \${t.status}\${t.body ? '：' + t.body : ''}\`
+    : \`\${uaName(t)} → HTTP \${t.status} · \${t.fmt} · \${t.bytes} 字节 · \${t.n} 个节点\`
   let h = '<div class="uplist" style="grid-template-columns:104px minmax(0,1fr)">'
+  if (r.tries && r.tries.length) h += row('逐个身份试拉', r.tries.map(tryLine).join('\\n'))
+  if (r.snap) h += row('本地快照', \`\${r.snap.n} 个节点，抓于 \${ago(r.snap.at)}\` + (r.http === 0 ? ' —— 拉不通时订阅仍靠它供节点' : ''))
   if (r.http === 0) {
     h += row('结果', '请求失败：' + (r.err || '未知错误'))
   } else {
+    h += row('采用', \`\${uaName(r)} 这一份\`)
     h += row('HTTP', r.http) + row('响应格式', r.fmt) + row('大小', r.bytes + ' 字节') + row('解析到节点', r.nodes + ' 个')
     h += row('Subscription-Userinfo 头', r.hasUserinfo ? r.headers['subscription-userinfo'] : '机场未返回该响应头')
     h += row('识别到的公告行', r.notes.length ? r.notes.join('\\n') : '（无）')
