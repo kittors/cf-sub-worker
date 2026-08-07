@@ -1059,6 +1059,62 @@ sec('29. sing-box：不支持的协议不得留下悬空引用')
   ok(vmOut && vmOut.tls && vmOut.tls.enabled && vmOut.transport && vmOut.transport.type === 'ws', 'vmess 带上 tls 与 ws transport')
 }
 
+sec('30. 节点命名带上来源机场')
+{
+  // 下发到客户端的名字里看不出节点是哪家机场的，出问题时没法判断该找谁。
+  const kv = { type: 'ss', server: 'a.example.invalid', port: '443', cipher: 'aes-128-gcm', password: 'x' }
+  const mk = (up, upName, raw) => ({ up, upName, raw, region: T.regionOf(raw), kv })
+  const three = [
+    mk('a', '三毛机场', '日本1|移动优化'), mk('a', '三毛机场', '2x专线-日本-2'), mk('a', '三毛机场', '香港原生IP-1'),
+    mk('b', 'MESL', '🇯🇵 日本 01'), mk('b', 'MESL', '🇯🇵 日本 02'),
+    mk('c', '赔钱机场', '🇺🇸美国01-0.1倍'),
+  ]
+  const named = T.applyNaming(three, {})
+  ok(named[0].name === '🇯🇵 日本 01 · 三毛机场', `格式为「地区 序号 · 机场」（实际 ${named[0].name}）`)
+  ok(named[5].name === '🇺🇸 美国 01 · 赔钱机场', '不同地区各自编号')
+
+  // 每家从 01 起：一眼看得出某家在某地区有几个节点，加删源也不牵动别家编号
+  ok(named[1].name === '🇯🇵 日本 02 · 三毛机场' && named[3].name === '🇯🇵 日本 01 · MESL',
+     '序号按「机场 + 地区」各排各的，不是全地区连号')
+  ok(named[2].name === '🇭🇰 香港 01 · 三毛机场', '同一机场换地区后重新起号')
+
+  // 两个源起同名会让 Clash 只认其中一个 proxy
+  const dup = T.applyNaming([mk('x', '未命名机场', '日本-1'), mk('y', '未命名机场', '日本-1')], {})
+  ok(dup[0].name === '🇯🇵 日本 01 · 未命名机场 1' && dup[1].name === '🇯🇵 日本 01 · 未命名机场 2',
+     '重名机场补序号区分')
+  ok(new Set(dup.map(n => n.name)).size === dup.length, '重名机场下节点名仍唯一')
+
+  // 自定义重命名按 up::raw 存，不受命名规则变动影响
+  const ov = T.applyNaming(three, { 'a::日本1|移动优化': { name: '我的日本节点' } })
+  ok(ov[0].name === '我的日本节点' && ov[0].custom === true, '自定义重命名优先于自动命名')
+  ok(ov[0].auto === '🇯🇵 日本 01 · 三毛机场', '自动名仍保留在 auto 字段里供还原')
+
+  // 地区组名绝不能带机场名 —— 分流策略指向的就是它，带了就等于每次加源都改策略目标
+  const up3 = named.filter(n => !n.off)
+  const cy = T.genClash(false, up3, P, LIB, {}, SET)
+  const cd = yaml ? yaml.load(cy) : null
+  if (cd) {
+    const rg = cd['proxy-groups'].filter(g => g.type === 'url-test').map(g => g.name)
+    ok(rg.includes('🇯🇵 日本') && !rg.some(n => /三毛|MESL|赔钱/.test(n)), '地区组名不含机场名')
+    const pn = new Set(cd.proxies.map(p => p.name))
+    ok(pn.size === cd.proxies.length, '多机场下 proxies 名唯一')
+    const dang = []
+    const gn = new Set(cd['proxy-groups'].map(g => g.name))
+    cd['proxy-groups'].forEach(g => (g.proxies || []).forEach(x => {
+      if (!pn.has(x) && !gn.has(x) && !['DIRECT', 'REJECT'].includes(x)) dang.push(`${g.name}→${x}`)
+    }))
+    ok(dang.length === 0, '改名后分组引用无悬空' + (dang.length ? ': ' + dang.slice(0, 2) : ''))
+  }
+  const sb3 = JSON.parse(T.genSB(up3, P, LIB, {}, SET))
+  const t3 = new Set(sb3.outbounds.map(o => o.tag)), m3 = []
+  sb3.outbounds.forEach(o => (o.outbounds || []).forEach(x => { if (!t3.has(x)) m3.push(`${o.tag}→${x}`) }))
+  ok(m3.length === 0, '改名后 sing-box 引用无悬空' + (m3.length ? ': ' + m3.slice(0, 2) : ''))
+
+  // 名字里已经有机场了，管理端右侧那列再显示一遍就是重复
+  const ui = T.adminHTML(true, true)
+  ok(!/<span class="raw">\$\{esc\(n\.upName\)\} · \$\{esc\(n\.raw\)\}<\/span>/.test(ui), '节点行不再重复显示机场名')
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
 

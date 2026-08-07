@@ -1200,14 +1200,35 @@ async function loadNodes(force, event) {
 
 function nodeKey(n) { return `${n.up}::${n.raw}` }
 
+// 两个源起了同一个名字时，节点名会撞车 —— Clash 要求 proxies 名唯一，
+// 重名会让客户端只认其中一个。按出现顺序给重名的机场补个序号区分。
+function upLabels(nodes) {
+  const ids = {}
+  for (const n of nodes) {
+    const nm = String(n.upName || '')
+    const list = ids[nm] || (ids[nm] = [])
+    if (!list.includes(n.up)) list.push(n.up)
+  }
+  const out = {}
+  for (const nm of Object.keys(ids)) {
+    ids[nm].forEach((id, i) => { out[id] = ids[nm].length > 1 ? `${nm} ${i + 1}` : nm })
+  }
+  return out
+}
+
 function applyNaming(nodes, overrides) {
   const seq = {}
+  const label = upLabels(nodes)
   return nodes.map(n => {
     const k = nodeKey(n)
     const ov = overrides[k] || {}
     const r = REGIONS.find(x => x.key === n.region) || REGIONS[REGIONS.length - 1]
-    seq[n.region] = (seq[n.region] || 0) + 1
-    const auto = `${r.flag} ${r.cn} ${String(seq[n.region]).padStart(2, '0')}`
+    // 序号按「机场 + 地区」各排各的，而不是全地区连号：
+    // 一眼看得出某家机场在某个地区有几个节点，加了源、删了源也不会牵动别家的编号。
+    const sk = `${n.up}::${n.region}`
+    seq[sk] = (seq[sk] || 0) + 1
+    const src = label[n.up] || n.upName || ''
+    const auto = `${r.flag} ${r.cn} ${String(seq[sk]).padStart(2, '0')}${src ? ' · ' + src : ''}`
     return { ...n, key: k, name: ov.name || auto, auto, custom: !!ov.name, off: !!ov.off }
   })
 }
@@ -2863,7 +2884,7 @@ function nodeCardInner(){
       <div class="nds"><div class="inner">\`
     h += r.nodes.map(n => \`<div class="nd \${n.off?'off':''}" data-k="\${esc(n.key)}">
       <span class="nm">\${esc(n.name)}\${n.custom?'<span class="tag">自定义</span>':''}</span>
-      <span class="raw">\${esc(n.upName)} · \${esc(n.raw)}</span>
+      <span class="raw">\${n.custom ? esc(n.upName) + ' · ' : ''}\${esc(n.raw)}</span>
       <span class="act" onclick="event.stopPropagation()"><button class="ib" data-tip="重命名" onclick="rename(this)">\${icon('edit')}</button>
       <button class="sw" data-on="\${n.off?0:1}" data-tip="\${n.off?'启用':'停用'}" onclick="toggle('\${esc(n.key)}',\${!n.off},this)"><i></i></button></span>
     </div>\`).join('')
