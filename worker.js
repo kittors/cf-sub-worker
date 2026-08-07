@@ -1422,6 +1422,20 @@ async function apiRoute(req, url, event) {
     } else if (body.act === 'toggle') {
       const u = ups.find(u => u.id === body.id)
       if (u) u.enabled = !u.enabled
+    } else if (body.act === 'sort') {
+      // 数组顺序就是拉取顺序，也就是节点在订阅里的先后
+      const ids = Array.isArray(body.ids) ? body.ids : []
+      const seen = new Set()
+      const next = []
+      for (const id of ids) {
+        const u = ups.find(x => x.id === id)
+        if (u && !seen.has(id)) { seen.add(id); next.push(u) }
+      }
+      // 另一个标签页刚加的源不在这份 ids 里，别把它弄丢
+      for (const u of ups) if (!seen.has(u.id)) next.push(u)
+      if (next.length !== ups.length) return json({ ok: false, msg: '顺序数据不完整' }, 400)
+      ups.length = 0
+      ups.push(...next)
     } else if (body.act === 'edit') {
       const u = ups.find(x => x.id === body.id)
       if (!u) return json({ ok: false, msg: '订阅源不存在' }, 404)
@@ -1454,7 +1468,21 @@ async function apiRoute(req, url, event) {
     } else return json({ ok: false, msg: '未知操作' }, 400)
 
     await kvPut('upstreams', ups)
-    await CONF.delete('cache:nodes')     // 配置变了，缓存立即作废
+    if (body.act === 'sort') {
+      // 排序没改变任何节点的内容，作废缓存等于让用户干等一轮全量重拉。
+      // 直接把缓存里的节点按新顺序重排即可 —— sort 是稳定的，
+      // 同一机场内部的节点相对顺序不受影响。
+      const c = await kvGet('cache:nodes', null)
+      if (c && Array.isArray(c.nodes)) {
+        const rank = {}
+        ups.forEach((u, i) => { rank[u.id] = i })
+        const at = n => rank[n.up] === undefined ? ups.length : rank[n.up]
+        c.nodes.sort((a, b) => at(a) - at(b))
+        if (hasKV) await CONF.put('cache:nodes', JSON.stringify(c), { expirationTtl: STALE_TTL })
+      }
+    } else {
+      await CONF.delete('cache:nodes')   // 配置变了，缓存立即作废
+    }
     // 前端据此增量插入一行，不必整页重拉
     return json({ ok: true, up: added ? { ...added, n: addedN } : null })
   }
@@ -2364,8 +2392,8 @@ input::placeholder,textarea::placeholder{color:var(--tx3)}
 /* 拖拽中：原行退成虚线空槽，作为落点指示。
    浏览器会另外渲染一张跟随鼠标的元素快照，原行若还留着淡淡的内容，
    两者叠在一起就是重影。用 opacity:0 抹掉内容但保留行高。 */
-.pol.drag{background:var(--accBg);border:1.5px dashed var(--accBd);box-shadow:none}
-.pol.drag > *{opacity:0}
+.pol.drag,.up.drag{background:var(--accBg);border:1.5px dashed var(--accBd);box-shadow:none}
+.pol.drag > *,.up.drag > *{opacity:0}
 .pol{cursor:default}
 .pol[draggable="true"]{cursor:grabbing}
 .pol.off{opacity:.5}
@@ -2397,7 +2425,7 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
    subgrid 让每行沿用父容器的列轨道，多行才真正逐列对齐。 */
 .uplist{display:grid;gap:7px}
 .uplist.own{grid-template-columns:auto auto auto minmax(0,1fr) auto auto}
-.uplist.src{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto auto auto}
+.uplist.src{grid-template-columns:auto auto auto minmax(0,1fr) auto auto auto auto auto auto}
 .uplist.lib{grid-template-columns:auto minmax(0,1fr) auto auto}
 .up{grid-column:1/-1;display:grid;grid-template-columns:subgrid;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--bd2);border-radius:10px;transition:border-color .16s var(--e),background .16s var(--e)}
 .up:hover{border-color:var(--bd);background:var(--hov)}
@@ -2790,8 +2818,9 @@ async function dash(skip){
   paintHeader()
   document.getElementById('body').innerHTML =
     TAB === 'node' ? viewNode() : TAB === 'sub' ? viewSub() : TAB === 'pol' ? viewPol() : viewLib()
+  if (TAB === 'node') bindDrag('.uplist.src', '.up', persistUpOrder)
   if (TAB === 'pol') {
-    bindDrag()
+    bindDrag('#pollist', '.pol', persistOrder)
     const sel = document.getElementById('pfsel')
     if (sel) {
       bindSelect(document)
@@ -2859,6 +2888,8 @@ function viewNode(){
 
   h += \`<div class="card anim" style="animation-delay:.06s"><div class="ttl">订阅源<span class="sp"></span>
     <button class="sm" onclick="addUp()">\${icon('plus','s')}添加</button></div>\`
+  h += ST.upstreams.length > 1
+    ? '<div class="hint" style="margin:-6px 0 13px">拖动左侧手柄调整顺序 —— 靠上的机场，节点排在订阅前面。</div>' : ''
   h += '<div class="uplist src">'
   h += ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
   h += '</div></div>'
@@ -2894,9 +2925,10 @@ function nodeCardInner(){
   return h
 }
 
-function upRow(u){
+function upRow(u, i){
   const snapAt = (ST.snaps || {})[u.id]
-  return \`<div class="up src \${u.enabled===false?'off':''}" data-id="\${u.id}">
+  return \`<div class="up src \${u.enabled===false?'off':''}" data-id="\${u.id}" data-i="\${i||0}" draggable="false">
+      <span class="grip" data-tip="拖动调整顺序">\${icon('grip','s')}</span>
       <span class="dot"></span>
       <span class="nm">\${esc(u.name)}\${u.auto===false?'<span class="tag manual" data-tip="不参与自动刷新，固定使用快照">手动</span>':''}</span>
       <span class="u">\${u.url ? esc(u.url) : '<span class="mute">粘贴导入 · 无链接</span>'}\${snapAt?\`<span class="snap">快照 \${ago(snapAt)}</span>\`:''}</span>
@@ -3218,9 +3250,10 @@ function viewLib(){
   return h + '</div></div>'
 }
 
-/* 拖拽排序 */
-function bindDrag(){
-  const list = document.getElementById('pollist')
+/* 拖拽排序。策略列表与订阅源列表共用，两边行为必须一致 ——
+   各写一套的话，一边修了抖动另一边照旧。 */
+function bindDrag(listSel, itemSel, persist){
+  const list = document.querySelector(listSel)
   if (!list) return
   let src = null
 
@@ -3242,7 +3275,7 @@ function bindDrag(){
     })
   }
 
-  list.querySelectorAll('.pol').forEach(row => {
+  list.querySelectorAll(itemSel).forEach(row => {
     const grip = row.querySelector('.grip')
     // 默认不可拖，只有在手柄上按下才开启，避免拖到按钮或文字时误触发
     row.draggable = false
@@ -3263,8 +3296,8 @@ function bindDrag(){
       row.classList.remove('drag')
       row.draggable = false
       src = null
-      list.querySelectorAll('.pol').forEach(r => { r.style.transition = ''; r.style.transform = '' })
-      persistOrder()
+      list.querySelectorAll(itemSel).forEach(r => { r.style.transition = ''; r.style.transform = '' })
+      persist()
     }
     row.ondragover = e => {
       e.preventDefault()
@@ -3291,6 +3324,32 @@ async function persistOrder(){
   if (next.every((p, i) => p === cur[i])) return
   POL.policies = next
   await savePol('顺序已保存')
+}
+
+// 订阅源顺序即节点加载顺序：靠前的机场，节点排在前面
+async function persistUpOrder(){
+  const list = document.querySelector('.uplist.src')
+  if (!list) return
+  const cur = ST.upstreams || []
+  const ids = [...list.querySelectorAll('.up')].map(el => el.dataset.id)
+  if (ids.length !== cur.length) return
+  if (ids.every((id, i) => cur[i] && cur[i].id === id)) return
+  ST.upstreams = ids.map(id => cur.find(u => u.id === id)).filter(Boolean)
+  const r = await api('/api/upstreams', { act:'sort', ids })
+  if (!r.ok) { toast(r.msg || '顺序保存失败', true); ST = null; return dash() }
+  toast('顺序已保存')
+  // 节点列表跟着换顺序，重绘它；订阅源那边 DOM 已经是对的，不动，
+  // 免得把用户刚拖完的行又重建一遍。
+  const card = document.getElementById('nodecard')
+  if (card) card.classList.add('busy')
+  PRF = null
+  const s = await api('/api/state')
+  if (card) card.classList.remove('busy')
+  if (!s || !s.ok) return
+  ST = s
+  paintHeader()
+  ;[...list.querySelectorAll('.up')].forEach((el, i) => { el.dataset.i = i })
+  if (card) card.innerHTML = nodeCardInner()
 }
 
 async function savePol(msg){
@@ -3628,7 +3687,7 @@ async function syncUp(nu){
     const em = list.querySelector('.empty')
     if (em) em.remove()
     ST.upstreams.push(nu)
-    list.insertAdjacentHTML('beforeend', upRow(nu))
+    list.insertAdjacentHTML('beforeend', upRow(nu, ST.upstreams.length - 1))
   }
   const card = document.getElementById('nodecard')
   if (card) card.classList.add('busy')
@@ -3638,7 +3697,10 @@ async function syncUp(nu){
   if (!r || !r.ok) return
   ST = r
   paintHeader()                    // 顶部「N 个订阅源 · M 个节点」
-  if (list) list.innerHTML = ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
+  if (list) {
+    list.innerHTML = ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
+    bindDrag('.uplist.src', '.up', persistUpOrder)   // 行是新建的，拖拽要重新绑
+  }
   if (card) card.innerHTML = nodeCardInner()
 }
 

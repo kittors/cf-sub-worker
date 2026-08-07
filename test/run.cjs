@@ -5,8 +5,16 @@ global.crypto = require('crypto').webcrypto
 global.btoa = s => Buffer.from(s, 'binary').toString('base64')
 global.atob = s => Buffer.from(s, 'base64').toString('binary')
 global.TextEncoder = TextEncoder
+// 内存版 KV，让 apiRoute 能被真的调用 —— 增删改排这些行为契约靠正则扫源码是守不住的。
+// get(key,'json') 必须照真实 KV 那样解析，否则 auth:secret 会带着引号回来，签名永远对不上。
+const KV = {}
+global.CONF = {
+  get: async (k, type) => { const v = KV[k]; return v === undefined ? null : (type === 'json' ? JSON.parse(v) : v) },
+  put: async (k, v) => { KV[k] = v },
+  delete: async k => { delete KV[k] },
+}
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -632,8 +640,10 @@ sec('19. 分流目标多选')
   // 浏览器会另外渲染跟随鼠标的元素快照，原行若留着淡内容就成重影。
   // 正确做法是原行退成虚线落点槽：内容 opacity:0（保留行高），边框虚线。
   ok(!/\.pol\.drag \*\{visibility:hidden\}/.test(ui), '不用 visibility:hidden（会连同布局一起塌）')
-  ok(/\.pol\.drag\{[^}]*dashed/.test(ui), '拖拽行呈虚线落点槽')
-  ok(/\.pol\.drag > \*\{opacity:0\}/.test(ui), '槽内内容隐藏但保留行高')
+  // 选择器可能与订阅源行合写成 `.pol.drag,.up.drag{…}`，别按精确字面量匹配
+  ok(/\.pol\.drag[^{]*\{[^}]*dashed/.test(ui), '策略拖拽行呈虚线落点槽')
+  ok(/\.pol\.drag > \*[^{]*\{[^}]*opacity:0/.test(ui), '槽内内容隐藏但保留行高')
+  ok(/\.up\.drag[^{]*\{[^}]*dashed/.test(ui), '订阅源拖拽行同样是虚线落点槽')
   ok(!/\.pol\.drag\{[^}]*opacity:\s*\.\d/.test(ui), '整行不再半透明，避免与拖拽预览重叠')
   // 多选必须一眼可辨，否则只选一项时外观与单选毫无区别
   ok(/\.sel\.multi \.selo::before\{/.test(ui), '多选项有常驻复选框')
@@ -789,9 +799,9 @@ sec('23. 订阅源可编辑')
   ok(ui.includes('快照 '), '行内显示快照时间')
   ok(ui.includes('function ago'), '存在相对时间函数')
   ok(/\.tag\.manual/.test(ui), '手动标记有独立样式')
-  // 加了编辑按钮，网格列数必须跟着加，否则整行错位
+  // 加了编辑按钮和拖拽手柄，网格列数必须跟着加，否则整行错位
   const cols = (ui.match(/\.uplist\.src\{grid-template-columns:([^}]+)\}/) || [])[1] || ''
-  ok(cols.trim().split(/\s+/).length === 9, `订阅源行 9 列（实际 ${cols.trim().split(/\s+/).length}）`)
+  ok(cols.trim().split(/\s+/).length === 10, `订阅源行 10 列（实际 ${cols.trim().split(/\s+/).length}）`)
   const wsrc2 = fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8')
   ok(wsrc2.includes("CONF.delete('snap:'"), '删除订阅源时清理其快照')
 }
@@ -1113,6 +1123,93 @@ sec('30. 节点命名带上来源机场')
   // 名字里已经有机场了，管理端右侧那列再显示一遍就是重复
   const ui = T.adminHTML(true, true)
   ok(!/<span class="raw">\$\{esc\(n\.upName\)\} · \$\{esc\(n\.raw\)\}<\/span>/.test(ui), '节点行不再重复显示机场名')
+}
+
+sec('31. 订阅源可拖拽排序')
+{
+  const ui = T.adminHTML(true, true)
+  // 拖拽逻辑与策略列表共用一份实现：各写一套的话，一边修了抖动另一边照旧
+  ok(/function bindDrag\(listSel, itemSel, persist\)/.test(ui), 'bindDrag 已泛化为可复用')
+  ok(/bindDrag\('#pollist', '\.pol', persistOrder\)/.test(ui), '策略列表沿用同一实现')
+  ok(/bindDrag\('\.uplist\.src', '\.up', persistUpOrder\)/.test(ui), '订阅源列表绑定拖拽')
+  ok(!/function bindDrag\(\)\{/.test(ui) && !/getElementById\('pollist'\)\n\s+if \(!list\) return\n\s+let src/.test(ui),
+     '没有残留的写死版本')
+
+  ok(/<span class="grip" data-tip="拖动调整顺序">/.test(ui), '订阅源行有拖拽手柄')
+  ok(/async function persistUpOrder/.test(ui), '存在顺序落库函数')
+  ok(/act:'sort', ids/.test(ui), '按 id 列表提交顺序')
+  ok(/靠上的机场，节点排在订阅前面/.test(ui), '说明顺序的实际作用')
+  // 一个源时排不了序，提示只会碍眼
+  ok(/ST\.upstreams\.length > 1[\s\S]{0,120}拖动左侧手柄/.test(ui), '只有多个源时才显示排序提示')
+
+  // 拖完立刻重建 DOM 会把用户刚拖好的行又抹一遍，只同步索引即可
+  ok(/\[\.\.\.list\.querySelectorAll\('\.up'\)\]\.forEach\(\(el, i\) => \{ el\.dataset\.i = i \}\)/.test(ui),
+     '保存后只回填索引，不重建订阅源行')
+  // 但增删源确实重建了行，那里必须重新绑定
+  ok(/list\.innerHTML = ST\.upstreams\.map\(upRow\)[\s\S]{0,120}bindDrag\('\.uplist\.src'/.test(ui),
+     '增删源重建行后重新绑定拖拽')
+  ok(/upRow\(nu, ST\.upstreams\.length - 1\)/.test(ui), '增量插入的行带上正确索引')
+
+  // 排序不改变任何节点内容，作废缓存等于让用户干等一轮全量重拉
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(/body\.act === 'sort'[\s\S]{0,400}c\.nodes\.sort/.test(src), '排序只重排缓存，不作废')
+  ok(/else \{\s*\n\s*await CONF\.delete\('cache:nodes'\)/.test(src), '其它操作仍然作废缓存')
+  ok(/for \(const u of ups\) if \(!seen\.has\(u\.id\)\) next\.push\(u\)/.test(src), '不在 ids 里的源不会被丢掉')
+  ok(/next\.length !== ups\.length[\s\S]{0,60}顺序数据不完整/.test(src), '数量对不上就拒绝落库')
+}
+
+sec('32. 排序接口的行为契约（真调 apiRoute）')
+{
+  // 顺序落库这件事有一堆边界：并发下 ids 不全、重复 id、幽灵 id。
+  // 这些靠扫源码是守不住的，得真发请求。
+  const exp = String(Date.now() + 3600e3)
+  const cookie = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const call = async body => {
+    const req = new Request('https://x/api/upstreams', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body),
+    })
+    const r = await T.apiRoute(req, new URL('https://x/api/upstreams'), null)
+    return { status: r.status, body: await r.json() }
+  }
+  const setUps = a => { KV['upstreams'] = JSON.stringify(a) }
+  const ids = () => JSON.parse(KV['upstreams']).map(u => u.id).join(',')
+
+  setUps([{ id: 'a', name: '三毛机场' }, { id: 'b', name: 'MESL' }, { id: 'c', name: '赔钱机场' }])
+  KV['cache:nodes'] = JSON.stringify({ at: 1, nodes: [
+    { up: 'a', raw: '三毛-日1' }, { up: 'a', raw: '三毛-日2' }, { up: 'b', raw: 'MESL-日1' },
+    { up: 'c', raw: '赔钱-日1' }, { up: 'c', raw: '赔钱-日2' }] })
+  let r = await call({ act: 'sort', ids: ['c', 'a', 'b'] })
+  ok(r.body.ok && ids() === 'c,a,b', `排序落库（${ids()}）`)
+  const cn = JSON.parse(KV['cache:nodes']).nodes.map(n => n.raw)
+  ok(cn.join() === '赔钱-日1,赔钱-日2,三毛-日1,三毛-日2,MESL-日1', '缓存节点跟着重排：' + cn.join(' | '))
+  ok(cn[0] === '赔钱-日1' && cn[1] === '赔钱-日2', '同机场内相对顺序不变（排序必须稳定）')
+  ok(KV['cache:nodes'] !== undefined, '排序不作废缓存，不让用户干等全量重拉')
+
+  // 另一个标签页刚加了源，这边提交的 ids 里没有它
+  setUps([{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'n', name: '新加的' }])
+  r = await call({ act: 'sort', ids: ['b', 'a'] })
+  ok(r.body.ok && ids() === 'b,a,n', `ids 不全时漏掉的源追加到末尾，不丢（${ids()}）`)
+
+  setUps([{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }])
+  r = await call({ act: 'sort', ids: ['b', 'b', 'ghost', 'a'] })
+  ok(r.body.ok && ids() === 'b,a', `重复 id 与不存在的 id 被忽略（${ids()}）`)
+
+  setUps([{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }])
+  r = await call({ act: 'sort', ids: [] })
+  ok(r.body.ok && ids() === 'a,b', '空 ids 保持原序')
+  r = await call({ act: 'sort', ids: '不是数组' })
+  ok(r.body.ok && ids() === 'a,b', '非数组入参不炸')
+
+  // 对照：改动内容的操作仍然要作废缓存
+  KV['cache:nodes'] = JSON.stringify({ at: 1, nodes: [] })
+  await call({ act: 'toggle', id: 'a' })
+  ok(KV['cache:nodes'] === undefined, '停用/启用仍然作废缓存')
+
+  // 顺带守一下鉴权：没 cookie 一律 401
+  const anon = await T.apiRoute(
+    new Request('https://x/api/upstreams', { method: 'POST', body: '{"act":"sort","ids":[]}' }),
+    new URL('https://x/api/upstreams'), null)
+  ok(anon.status === 401, '未登录访问排序接口返回 401')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
