@@ -1349,6 +1349,30 @@ async function apiRoute(req, url, event) {
   if (!await checkCookie(req)) return json({ ok: false, msg: '未登录' }, 401)
   const p = url.pathname
 
+  // 改密码。以前只有首次初始化那一次机会，之后想换只能去 KV 里删 auth:password，
+  // 而那会让管理端在重设之前一直处于无密码状态 —— 公网上开着的后台，不该这么干。
+  if (p === '/api/password' && req.method === 'POST') {
+    const { oldPassword, newPassword } = await req.json().catch(() => ({}))
+    const stored = await kvGet('auth:password', null)
+    if (!stored) return json({ ok: false, msg: '尚未设置过密码' }, 400)
+    // 登录态不能替代当前密码：cookie 被借走时，改密码等于把号让出去
+    if (await sha256(String(oldPassword || '')) !== stored) return json({ ok: false, msg: '当前密码不正确' }, 401)
+    const np = String(newPassword || '')
+    if (np.length < 8) return json({ ok: false, msg: '新密码至少 8 位' }, 400)
+    if (np === String(oldPassword)) return json({ ok: false, msg: '新密码与当前密码相同' }, 400)
+    await kvPut('auth:password', await sha256(np))
+    // 换了密码，别处已经登上的会话就该作废，否则改了等于没改。
+    // 轮换签名密钥即可让所有旧 cookie 失效；当前这台重新签一张，
+    // 免得刚改完就把正在操作的人自己踢下线。
+    await kvPut('auth:secret', randHex(32))
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': `sess=${await makeCookie()}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
+      }
+    })
+  }
+
   if (p === '/api/state') {
     const d = await swrNodes(event)
     const ups = await kvGet('upstreams', [])
@@ -2534,6 +2558,7 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 <g id="i-plus" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></g>
 <g id="i-out" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 21H5.5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 16.5 4.5-4.5L16 7.5"/><path d="M20.5 12H9.5"/></g>
 <g id="i-down" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g>
+<g id="i-lock" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></g>
 <g id="i-grip" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="15" cy="18" r="1.3"/></g>
 <g id="i-undo" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.1-9.4L3 7"/></g>
 <g id="i-fold" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m4 8 8 8 8-8"/></g>
@@ -2859,6 +2884,7 @@ function viewNode(){
   // 订阅地址统一在「订阅」页展示，这里不再重复一份
   let h = \`<div class="card anim" style="animation-delay:0s">
     <div class="ttl">站点设置<span class="sp"></span>
+      <button class="g sm" onclick="changePwd()">\${icon('lock','s')}修改密码</button>
       <button class="g sm" onclick="editSettings()">\${icon('edit','s')}编辑</button></div>
     <div class="uplist" style="grid-template-columns:auto minmax(0,1fr)">
       <div class="up"><span class="nm">本站域名</span>
@@ -3585,6 +3611,27 @@ window.resetOwn = async () => {
 }
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
+window.changePwd = async () => {
+  const html = \`
+    <div class="fg"><label class="lb">当前密码</label>
+      <input id="p0" type="password" autocomplete="current-password" placeholder="先验证身份"></div>
+    <div class="fg"><label class="lb">新密码</label>
+      <input id="p1" type="password" autocomplete="new-password" placeholder="至少 8 位"></div>
+    <div class="fg"><label class="lb">再输一次</label>
+      <input id="p2" type="password" autocomplete="new-password" placeholder="确认新密码">
+      <div class="hint">保存后其它设备上的登录会失效，当前这台不用重新登录。</div></div>\`
+  const box = await modal({ title:'修改密码', html, ok:'保存', wide:true })
+  if (!box) return
+  const oldPassword = box.querySelector('#p0').value
+  const newPassword = box.querySelector('#p1').value
+  // 输错了自己却看不见，只能在下次登录时才发现 —— 所以要求输两遍
+  if (newPassword !== box.querySelector('#p2').value) return toast('两次输入的新密码不一致', true)
+  if (!oldPassword) return toast('请输入当前密码', true)
+  if (newPassword.length < 8) return toast('新密码至少 8 位', true)
+  const r = await api('/api/password', { oldPassword, newPassword })
+  if (!r.ok) return toast(r.msg || '修改失败', true)
+  toast('密码已更新')
+}
 // 拉不通时的退路对话框。粘了内容就用内容，留空直接保存就是先把源加进来。
 // 两件事塞进一个弹窗，是因为用户此刻只关心一件事：怎么才能把它用上。
 const pasteBox = async (title, msg) => {

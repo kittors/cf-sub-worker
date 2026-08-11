@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1210,6 +1210,67 @@ sec('32. 排序接口的行为契约（真调 apiRoute）')
     new Request('https://x/api/upstreams', { method: 'POST', body: '{"act":"sort","ids":[]}' }),
     new URL('https://x/api/upstreams'), null)
   ok(anon.status === 401, '未登录访问排序接口返回 401')
+}
+
+sec('33. 修改密码')
+{
+  // 以前只有首次初始化那一次机会设密码，之后想换只能去 KV 删 auth:password，
+  // 而那会让公网上的管理端一直裸奔到重设为止。
+  const sha = async s => T.sha256(s)
+  const login = async () => {
+    const exp = String(Date.now() + 3600e3)
+    return 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  }
+  const call = async (body, cookie) => {
+    const h = { 'Content-Type': 'application/json' }
+    if (cookie) h.Cookie = cookie
+    const req = new Request('https://x/api/password', { method: 'POST', headers: h, body: JSON.stringify(body) })
+    const r = await T.apiRoute(req, new URL('https://x/api/password'), null)
+    return { status: r.status, body: await r.json(), setCookie: r.headers.get('Set-Cookie') }
+  }
+
+  KV['auth:password'] = JSON.stringify(await sha('oldpass123'))
+  let cookie = await login()
+
+  let r = await call({ oldPassword: '错的密码', newPassword: 'newpass123' }, cookie)
+  ok(r.status === 401 && /当前密码不正确/.test(r.body.msg), '旧密码不对则拒绝')
+  ok(JSON.parse(KV['auth:password']) === await sha('oldpass123'), '拒绝时密码未被改动')
+
+  r = await call({ oldPassword: 'oldpass123', newPassword: 'short' }, cookie)
+  ok(r.status === 400 && /至少 8 位/.test(r.body.msg), '新密码太短则拒绝')
+
+  r = await call({ oldPassword: 'oldpass123', newPassword: 'oldpass123' }, cookie)
+  ok(r.status === 400 && /相同/.test(r.body.msg), '新旧密码相同则拒绝')
+
+  // 光有 cookie 不够 —— cookie 被借走时，改密码等于把号让出去
+  r = await call({ newPassword: 'newpass123' }, cookie)
+  ok(r.status === 401, '不带当前密码、只凭登录态改不了')
+
+  r = await call({ oldPassword: 'oldpass123', newPassword: 'newpass123' }, cookie)
+  ok(r.body.ok === true, '旧密码正确则允许修改')
+  ok(JSON.parse(KV['auth:password']) === await sha('newpass123'), '新密码已落库（存的是哈希）')
+  ok(JSON.parse(KV['auth:password']) !== 'newpass123', '绝不存明文')
+
+  // 换了密码，别处的会话就该作废，否则改了等于没改
+  const stale = await T.apiRoute(
+    new Request('https://x/api/state', { headers: { Cookie: cookie } }), new URL('https://x/api/state'), null)
+  ok(stale.status === 401, '旧 cookie 已失效，其它设备被登出')
+  ok(/^sess=/.test(r.setCookie || ''), '当前设备换发新 cookie，不被自己踢下线')
+  const fresh = r.setCookie.match(/^sess=([^;]+)/)[1]
+  const ok2 = await T.apiRoute(
+    new Request('https://x/api/state', { headers: { Cookie: 'sess=' + fresh } }), new URL('https://x/api/state'), null)
+  ok(ok2.status !== 401, '新发的 cookie 可继续访问')
+
+  // 未登录当然改不了
+  const anon = await call({ oldPassword: 'newpass123', newPassword: 'another123' }, null)
+  ok(anon.status === 401, '未登录访问改密码接口返回 401')
+
+  const ui = T.adminHTML(true, true)
+  ok(/onclick="changePwd\(\)"/.test(ui), '管理端有修改密码入口')
+  ok(/type="password"/.test(ui), '密码框用 type=password，不明文回显')
+  ok(/两次输入的新密码不一致/.test(ui), '要求输两遍，输错了不至于下次登录才发现')
+  ok(!/value="\$\{esc\(.*password.*\)\}"/i.test(ui), '页面不回填任何密码值')
+  delete KV['auth:password']
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
