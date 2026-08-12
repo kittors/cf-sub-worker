@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1306,6 +1306,128 @@ sec('34. 直连域名的输入清洗')
   const ui = T.adminHTML(true, true)
   ok(/子域名自动包含/.test(ui), '界面上说明了不用写通配符')
   delete KV['settings']
+}
+
+sec('35. 链式代理')
+{
+  // 一条链 = 先连中转、再从中转连落地，出口 IP 是落地的。
+  // 用途：自建做中转（入口线路好），机场家宽做落地（住宅 IP 风控友好）。
+  const land = up.find(n => n.kv.type === 'vless' && n.kv.network === 'ws')
+  const hy = up.find(n => n.kv.type === 'hysteria2')
+  ok(!!land && !!hy, 'fixture 里有可作落地的 vless+ws 与 hysteria2 节点')
+  const ownKey = Object.keys(OWN)[0]
+  const chains = [{ id: 'c1', name: '🔗 AI 家宽链', via: 'own:' + ownKey, out: land.key, enabled: true }]
+  const liveKeys = [...new Set(up.map(n => n.region))]
+
+  // 落地协议决定这条链能不能通：内层跑在外层隧道里，UDP 系协议转发不了
+  ok(T.chainLandingWarn(land.kv) === '', 'vless 落地不告警')
+  ok(/hysteria2/.test(T.chainLandingWarn(hy.kv)), 'hysteria2 落地会告警')
+  ok(/tuic/i.test(T.chainLandingWarn({ type: 'tuic' })), 'tuic 落地会告警')
+
+  const rc = T.resolveChains(chains, up, OWN, liveKeys)
+  ok(rc.length === 1 && rc[0].via === OWN[ownKey].name, `中转解析成节点名（${rc[0] && rc[0].via}）`)
+  ok(rc[0].land.key === land.key, '落地对应到具体节点')
+  ok(T.resolveChains([{ ...chains[0], enabled: false }], up, OWN, liveKeys).length === 0, '停用的链不生成')
+  ok(T.resolveChains([{ ...chains[0], out: 'ghost::none' }], up, OWN, liveKeys).length === 0, '落地节点没了则整条链跳过')
+
+  const pol = [{ id: 'ai', name: '🤖 AI', target: 'chain:c1', strict: true, presets: ['ai'], domains: [], keywords: [], processes: [], enabled: true }]
+
+  // Clash：落地整份复制一遍加 dialer-proxy，原节点必须还在（地区组还要直连用它）
+  const cy = T.genClash(false, up, pol, LIB, OWN, SET, chains)
+  const cd = yaml ? yaml.load(cy) : null
+  if (cd) {
+    const cn = cd.proxies.find(p => p.name === '🔗 AI 家宽链')
+    ok(!!cn, '生成了链式节点')
+    ok(cn && cn['dialer-proxy'] === OWN[ownKey].name, `dialer-proxy 指向中转（${cn && cn['dialer-proxy']}）`)
+    ok(cn && cn.server === land.kv.server && cn.network === 'ws', '完整复制了落地节点的配置')
+    ok(cn && cn['ws-opts'] && cn['ws-opts'].path === '/ray', '嵌套的传输层参数一并复制')
+    ok(!!cd.proxies.find(p => p.name === land.name), '原落地节点仍然保留')
+    const g = cd['proxy-groups'].find(x => x.name === '🤖 AI')
+    ok(g && g.proxies.length === 1 && g.proxies[0] === '🔗 AI 家宽链', '策略指向链式节点')
+    const pn = new Set(cd.proxies.map(p => p.name)), gn = new Set(cd['proxy-groups'].map(g2 => g2.name)), dang = []
+    cd['proxy-groups'].forEach(g2 => (g2.proxies || []).forEach(x => {
+      if (!pn.has(x) && !gn.has(x) && !['DIRECT', 'REJECT'].includes(x)) dang.push(x)
+    }))
+    ok(dang.length === 0, 'Clash 无悬空引用' + (dang.length ? ': ' + dang.slice(0, 2) : ''))
+  }
+
+  // sing-box：detour 指向中转的 tag
+  const sb = JSON.parse(T.genSB(up, pol, LIB, OWN, SET, chains))
+  const so = sb.outbounds.find(o => o.tag === '🔗 AI 家宽链')
+  ok(!!so && so.detour === OWN[ownKey].name, `detour 指向中转（${so && so.detour}）`)
+  ok(so && so.transport && so.transport.type === 'ws', '链式 outbound 保留传输层')
+  const tags = new Set(sb.outbounds.map(o => o.tag)), miss = []
+  sb.outbounds.forEach(o => (o.outbounds || []).forEach(x => { if (!tags.has(x)) miss.push(`${o.tag}→${x}`) }))
+  sb.route.rules.forEach(r => { if (r.outbound && !tags.has(r.outbound)) miss.push('rule→' + r.outbound) })
+  ok(tags.has(so.detour), 'detour 指向的 outbound 确实存在')
+  ok(miss.length === 0, 'sing-box 无悬空引用' + (miss.length ? ': ' + miss.slice(0, 2) : ''))
+
+  // share 格式没有链式的写法，硬塞进去会变成不带中转的直连，出口 IP 全变
+  const shLines = Buffer.from(T.genShare(up, OWN), 'base64').toString('utf8').split('\n').filter(Boolean)
+  ok(!shLines.some(l => decodeURIComponent(l).includes('AI 家宽链')), 'share 格式里不含链式节点')
+
+  // 链被删掉后，指向它的策略必须干净回落，不能留悬空引用
+  const cy2 = yaml ? yaml.load(T.genClash(false, up, pol, LIB, OWN, SET, [])) : null
+  if (cy2) {
+    const g2 = cy2['proxy-groups'].find(x => x.name === '🤖 AI')
+    ok(g2 && g2.proxies[0] === '🚀 节点选择', '链没了策略回落到节点选择')
+    ok(!cy2.proxies.find(p => p.name === '🔗 AI 家宽链'), '链没了就不生成该节点')
+  }
+  ok(T.resolveTarget('chain:nonexist', liveKeys, OWN, []) === '🚀 节点选择', '指向不存在的链会回落')
+  ok(T.resolveTarget('chain:c1', liveKeys, OWN, [{ id: 'c1', name: '🔗 AI 家宽链' }]) === '🔗 AI 家宽链', 'chain: 目标能解析')
+}
+
+sec('36. 链式代理的接口契约')
+{
+  const exp = String(Date.now() + 3600e3)
+  const cookie = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const call = async body => {
+    const req = new Request('https://x/api/chains', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body),
+    })
+    const r = await T.apiRoute(req, new URL('https://x/api/chains'), null)
+    return { status: r.status, body: await r.json() }
+  }
+  delete KV['chains']
+  let r = await call({ act: 'save', name: '链A', via: 'own:usV2', out: 'up::node1' })
+  ok(r.body.ok && r.body.chains.length === 1, '新建链')
+  const id = r.body.chains[0].id
+  ok(r.body.chains[0].enabled === true, '默认启用')
+
+  // 名字直接就是客户端里的节点名，重名等于互相覆盖
+  r = await call({ act: 'save', name: '链A', via: 'own:usV2', out: 'up::node2' })
+  ok(!r.body.ok && /同名/.test(r.body.msg), '拒绝重名的链')
+
+  r = await call({ act: 'save', name: '', via: 'own:usV2', out: 'up::node1' })
+  ok(!r.body.ok && /名字/.test(r.body.msg), '拒绝空名字')
+  r = await call({ act: 'save', name: '链B', via: '', out: 'up::node1' })
+  ok(!r.body.ok && /中转和落地/.test(r.body.msg), '中转或落地为空则拒绝')
+
+  r = await call({ act: 'save', id: id, name: '链A改名', via: 'own:usH', out: 'up::node3' })
+  ok(r.body.ok && r.body.chains.length === 1 && r.body.chains[0].name === '链A改名', '编辑不会新增一条')
+  ok(r.body.chains[0].via === 'own:usH' && r.body.chains[0].out === 'up::node3', '中转与落地都已更新')
+
+  r = await call({ act: 'toggle', id: id })
+  ok(r.body.chains[0].enabled === false, '可停用')
+  r = await call({ act: 'toggle', id: id })
+  ok(r.body.chains[0].enabled === true, '可重新启用')
+
+  r = await call({ act: 'del', id: id })
+  ok(r.body.ok && r.body.chains.length === 0, '可删除')
+  r = await call({ act: '乱来' })
+  ok(!r.body.ok, '未知操作被拒')
+
+  const anon = await T.apiRoute(new Request('https://x/api/chains', { method: 'POST', body: '{"act":"del"}' }),
+    new URL('https://x/api/chains'), null)
+  ok(anon.status === 401, '未登录访问返回 401')
+
+  const ui = T.adminHTML(true, true)
+  ok(/function chainCardInner/.test(ui), '管理端有链式代理卡片')
+  ok(/window\.editChain/.test(ui), '有编辑入口')
+  ok(/出口 IP 是<b>落地<\/b>的/.test(ui), '说明了出口是哪一跳')
+  ok(/base64 分享链接格式里没有对应写法/.test(ui), '说明了 share 格式不支持')
+  ok(/dialer-proxy 是加在节点上的字段/.test(ui), '解释了落地为什么只能选具体节点')
+  delete KV['chains']
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

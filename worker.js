@@ -493,6 +493,41 @@ async function loadProfiles() {
   return Array.isArray(ps) && ps.length ? ps : DEFAULT_PROFILES
 }
 
+// ---------- 链式代理 ----------
+// 一条链 = 先连中转，再从中转连落地，出口 IP 是落地的。
+// 典型用法：自建节点做中转（入口线路好、稳），机场家宽节点做落地（住宅 IP，
+// 风控友好）—— 机场家宽便宜正是因为入口线路差，套一层自建正好互补。
+async function loadChains() {
+  const c = await kvGet('chains', null)
+  return Array.isArray(c) ? c : []
+}
+
+// 落地节点必须是具体的某一个：dialer-proxy 是加在节点上的字段，
+// 指向一个组的话没地方安放。中转反过来可以是组，组内挂了会自动换。
+function resolveChains(chains, up, own, liveKeys) {
+  const out = []
+  const byKey = {}
+  for (const n of up) byKey[n.key] = n
+  for (const c of (chains || [])) {
+    if (c.enabled === false) continue
+    const land = byKey[c.out]
+    if (!land) continue                       // 落地节点没了（机场改名/下线），整条链跳过
+    const via = resolveTarget(c.via, liveKeys, own, null)
+    if (!via || via === c.name) continue      // 中转解析不出来，或指向自己
+    out.push({ id: c.id, name: c.name, via, land })
+  }
+  return out
+}
+
+// 落地节点的协议决定这条链能不能通：链路里层跑在外层的隧道内，
+// 基于 UDP 的协议（hysteria2/tuic）在多数隧道里没法转发。
+// mihomo 官方文档也建议落地用简单协议。
+const CHAIN_BAD_LANDING = /^(hysteria2?|tuic|wireguard)$/i
+function chainLandingWarn(kv) {
+  const t = unquote((kv || {}).type || '')
+  return CHAIN_BAD_LANDING.test(t) ? `落地节点是 ${t}，基于 UDP 的协议在链式里多半连不通，建议换 vless / vmess / trojan / ss` : ''
+}
+
 // 按档案裁剪出这份订阅该看到的内容。
 // 档案带专属策略时直接用它，否则回落到全局策略并按 pols 白名单裁剪。
 function applyProfile(prof, own, up, globalPolicies) {
@@ -1296,14 +1331,16 @@ async function handle(req, event) {
     'Subscription-Userinfo': 'upload=0; download=0; total=1073741824000; expire=0'
   }
 
-  const [rawOwn, rawPol, lib, set] = await Promise.all([loadOwn(), loadPolicies(), loadLib(), loadSettings()])
+  const [rawOwn, rawPol, lib, set, chains] = await Promise.all([loadOwn(), loadPolicies(), loadLib(), loadSettings(), loadChains()])
   const f = applyProfile(prof, rawOwn, up, rawPol.filter(p => p.enabled !== false))
 
+  // 链式节点是 Clash / sing-box 专有能力，分享链接格式里没有对应表达，
+  // 只能整条略过 —— 硬塞一个落地节点进去会变成不带中转的直连，出口 IP 全变。
   if (fmt === 'share') return new Response(genShare(f.up, f.own), { headers: { ...h, 'Content-Type': 'text/plain; charset=utf-8' } })
   // URL 上的 mode 优先，其次用档案自己的设定
   const mode = url.searchParams.get('mode') || prof.mode || 'whitelist'
-  if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
-  return new Response(genClash(mode === 'blacklist', f.up, f.policies, lib, f.own, set), { headers: { ...h, 'Content-Type': 'text/yaml; charset=utf-8' } })
+  if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set, chains), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
+  return new Response(genClash(mode === 'blacklist', f.up, f.policies, lib, f.own, set, chains), { headers: { ...h, 'Content-Type': 'text/yaml; charset=utf-8' } })
 }
 
 // ---------- 管理端路由 ----------
@@ -1649,6 +1686,8 @@ async function apiRoute(req, url, event) {
       targets: [
         { v: 'all', label: '🚀 节点选择（全部）' },
         ...Object.entries(await loadOwn()).map(([k, n]) => ({ v: 'own:' + k, label: n.name + '（自有）' })),
+        // 链式排在地区组前面：会用到它的多半是 AI 这类专门指定出口的策略
+        ...(await loadChains()).filter(c => c.enabled !== false).map(c => ({ v: 'chain:' + c.id, label: c.name + '（链式）' })),
         ...REGIONS.filter(r => live.includes(r.key)).map(r => ({ v: 'region:' + r.key, label: `${r.flag} ${r.cn}（机场）` })),
         { v: 'direct', label: '直连' },
         { v: 'reject', label: '拒绝' }
@@ -1709,6 +1748,61 @@ async function apiRoute(req, url, event) {
       }
     })
   }
+  // 链式代理：先连中转、再从中转连落地，出口 IP 是落地的
+  if (p === '/api/chains' && req.method === 'POST') {
+    const body = await req.json().catch(() => ({}))
+    const chains = await loadChains()
+    if (body.act === 'save') {
+      const name = String(body.name || '').trim().slice(0, 30)
+      const via = String(body.via || '').trim()
+      const out = String(body.out || '').trim()
+      if (!name) return json({ ok: false, msg: '给这条链起个名字' }, 400)
+      if (!via || !out) return json({ ok: false, msg: '中转和落地都要选' }, 400)
+      const i = chains.findIndex(c => c.id === body.id)
+      // 名字要唯一：它会直接变成客户端里的节点名，重名等于互相覆盖
+      if (chains.some((c, j) => j !== i && c.name === name)) return json({ ok: false, msg: '已有同名的链' }, 400)
+      const rec = { id: body.id || randHex(6), name, via, out, enabled: i >= 0 ? chains[i].enabled !== false : true }
+      if (i >= 0) chains[i] = rec; else chains.push(rec)
+    } else if (body.act === 'del') {
+      const i = chains.findIndex(c => c.id === body.id)
+      if (i >= 0) chains.splice(i, 1)
+    } else if (body.act === 'toggle') {
+      const c = chains.find(x => x.id === body.id)
+      if (c) c.enabled = c.enabled === false
+    } else return json({ ok: false, msg: '未知操作' }, 400)
+    await kvPut('chains', chains)
+    return json({ ok: true, chains })
+  }
+
+  if (p === '/api/chains') {
+    const [chains, own, d] = await Promise.all([loadChains(), loadOwn(), swrNodes(event)])
+    const up = (d.all || []).filter(n => !n.off)
+    const liveKeys = REGIONS.filter(r => up.some(n => n.region === r.key)).map(r => r.key)
+    const byKey = {}
+    for (const n of up) byKey[n.key] = n
+    // 落地节点可能已经不在了（机场改名/下线），把状态一并回给前端，
+    // 否则界面上是一条看着正常、实际不生成任何东西的链
+    return json({
+      ok: true,
+      chains: chains.map(c => {
+        const land = byKey[c.out]
+        return {
+          ...c,
+          landName: land ? land.name : '',
+          landGone: !land,
+          viaName: resolveTarget(c.via, liveKeys, own, null),
+          warn: land ? chainLandingWarn(land.kv) : ''
+        }
+      }),
+      // 可选的中转与落地清单
+      vias: [
+        ...Object.entries(own).map(([k, n]) => ({ v: 'own:' + k, label: n.name + '（自有）' })),
+        ...REGIONS.filter(r => liveKeys.includes(r.key)).map(r => ({ v: 'region:' + r.key, label: `${r.flag} ${r.cn}（机场）` }))
+      ],
+      lands: up.map(n => ({ v: n.key, label: n.name, warn: chainLandingWarn(n.kv) }))
+    })
+  }
+
   // 站点设置：本站域名与额外直连规则，代码里不硬编码任何站点信息
   if (p === '/api/settings') {
     if (req.method === 'POST') {
@@ -1803,10 +1897,14 @@ function q(a) { return a.map(n => '"' + n + '"').join(', ') }
 
 // 把策略的 target 解析成客户端里真实存在的组名 / 节点名。
 // 指向的地区若当前没有节点，退回 🚀 节点选择，避免产生悬空引用让客户端拒绝整份配置。
-function resolveTarget(t, liveKeys, own) {
+function resolveTarget(t, liveKeys, own, chains) {
   if (t === 'direct') return 'DIRECT'
   if (t === 'reject') return 'REJECT'
   if (t === 'all') return '🚀 节点选择'
+  if (String(t).startsWith('chain:')) {
+    const c = (chains || []).find(x => x.id === String(t).slice(6))
+    return c ? c.name : '🚀 节点选择'      // 链被删了就回落，别留个悬空引用
+  }
   if (String(t).startsWith('own:')) {
     const n = (own || {})[String(t).slice(4)]
     return n ? n.name : '🚀 节点选择'
@@ -1827,10 +1925,10 @@ function targetList(p) {
 }
 
 // 解析成客户端里真实存在的名字，去重后保持选择顺序
-function resolveTargets(p, liveKeys, own) {
+function resolveTargets(p, liveKeys, own, chains) {
   const out = []
   for (const t of targetList(p)) {
-    const r = resolveTarget(t, liveKeys, own)
+    const r = resolveTarget(t, liveKeys, own, chains)
     if (r && !out.includes(r)) out.push(r)
   }
   return out.length ? out : ['🚀 节点选择']
@@ -1847,13 +1945,14 @@ function policyMembers(p, targets, allN, regionNames) {
   return out
 }
 
-function genClash(blacklist, up, policies, lib, own, st) {
+function genClash(blacklist, up, policies, lib, own, st, chains) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   const ownN = Object.values(own).map(n => n.name)
   const upN = up.map(n => n.name)
-  const allN = [...ownN, ...upN]
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
   const liveKeys = liveR.map(r => r.key)
+  const ch = resolveChains(chains, up, own, liveKeys)
+  const allN = [...ownN, ...upN, ...ch.map(c => c.name)]
   const regionNames = liveR.map(r => `${r.flag} ${r.cn}`)
   const act = (policies || []).filter(p => p.enabled !== false)
 
@@ -1906,9 +2005,21 @@ function genClash(blacklist, up, policies, lib, own, st) {
     pl += lines.join('\n') + '\n\n'
   })
 
+  // 链式节点：把落地节点整份复制一遍，加 dialer-proxy 指向中转。
+  // 必须是副本而不是改原节点 —— 原节点还要照常出现在地区组里直连用。
+  ch.forEach(c => {
+    const lines = [`  - name: "${c.name}"`]
+    for (const k of Object.keys(c.land.kv)) {
+      if (k === 'name' || k === 'dialer-proxy' || k.startsWith('_')) continue
+      lines.push(`    ${k}: ${c.land.kv[k]}`)
+    }
+    lines.push(`    dialer-proxy: "${c.via}"`)
+    pl += lines.join('\n') + '\n\n'
+  })
+
   // 策略组 —— 每条启用的策略一个 select 组
   const polGroups = act.map(p => {
-    const t = resolveTargets(p, liveKeys, own)
+    const t = resolveTargets(p, liveKeys, own, ch)
     return [
       `  - name: "${p.name}"`,
       `    type: select`,
@@ -2105,7 +2216,7 @@ function toSB(n) {
   return null
 }
 
-function genSB(up, policies, lib, own, st) {
+function genSB(up, policies, lib, own, st, chains) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   // 转不出 outbound 的节点必须在这里就整个剔掉，后面所有分组都基于过滤后的 up。
   // 只 filter(Boolean) 掉 outbound、却让地区组继续按全量节点取名字，
@@ -2115,9 +2226,19 @@ function genSB(up, policies, lib, own, st) {
   up = conv.map(x => x.n)
   const upOut = conv.map(x => x.o)
   const ownN = Object.values(own).map(n => n.name)
-  const allN = [...ownN, ...upOut.map(o => o.tag)]
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
   const liveKeys = liveR.map(r => r.key)
+  // 链式 outbound：复制落地节点的 outbound，改 tag，加 detour 指向中转。
+  // 落地本身转不出 outbound（协议不认识）时整条链跳过，绝不留悬空引用。
+  const chOut = []
+  for (const c of resolveChains(chains, up, own, liveKeys)) {
+    const o = toSB({ ...c.land, name: c.name })
+    if (!o) continue
+    o.detour = c.via === 'DIRECT' ? 'direct-out' : c.via === 'REJECT' ? 'block-out' : c.via
+    chOut.push(o)
+  }
+  const ch = chOut.map(o => ({ id: (chains || []).find(x => x.name === o.tag)?.id, name: o.tag }))
+  const allN = [...ownN, ...upOut.map(o => o.tag), ...chOut.map(o => o.tag)]
   const regionNames = liveR.map(r => `${r.flag} ${r.cn}`)
   const act = (policies || []).filter(p => p.enabled !== false)
 
@@ -2136,7 +2257,8 @@ function genSB(up, policies, lib, own, st) {
       }
       return { type: 'hysteria2', tag: n.name, server: n.s, server_port: n.p, password: n.u, obfs: { type: n.obfs, password: n.opwd }, tls: { enabled: true, server_name: n.sni, insecure: true } }
     }),
-    ...upOut
+    ...upOut,
+    ...chOut
   ]
 
   // 地区 url-test 组
@@ -2150,7 +2272,7 @@ function genSB(up, policies, lib, own, st) {
 
   // 策略组
   act.forEach(p => {
-    const t = resolveTargets(p, liveKeys, own)
+    const t = resolveTargets(p, liveKeys, own, ch)
     outbounds.push({
       type: 'selector', tag: p.name,
       outbounds: policyMembers(p, t, allN, regionNames).map(mapTag)
@@ -2455,6 +2577,10 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 .uplist{display:grid;gap:7px}
 .uplist.own{grid-template-columns:auto auto auto minmax(0,1fr) auto auto}
 .uplist.src{grid-template-columns:auto auto auto minmax(0,1fr) auto auto auto auto auto auto}
+.uplist.chain{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto}
+.up.chain .hop{background:var(--bg);border:1px solid var(--bd2);border-radius:6px;padding:1.5px 7px;font-size:12px}
+.up.chain .hop.gone{color:var(--warn);border-color:var(--warnBd);border-style:dashed}
+.up.chain .arw{color:var(--tx3);margin:0 7px}
 .uplist.lib{grid-template-columns:auto minmax(0,1fr) auto auto}
 .up{grid-column:1/-1;display:grid;grid-template-columns:subgrid;align-items:center;gap:11px;padding:10px 12px;border:1px solid var(--bd2);border-radius:10px;transition:border-color .16s var(--e),background .16s var(--e)}
 .up:hover{border-color:var(--bd);background:var(--hov)}
@@ -2597,7 +2723,7 @@ const api = async (p, b) => {
   }
 }
 const icon = (n, cls = '') => \`<svg class="ic \${cls}" viewBox="0 0 24 24" stroke-width="2"><use href="#i-\${n}"/></svg>\`
-let TAB = 'node', ST = null, POL = null, OWN = null, PRF = null, PF = '', SET = null
+let TAB = 'node', ST = null, POL = null, OWN = null, PRF = null, PF = '', SET = null, CH = null
 
 function toast(msg, err){
   const dup = [...tsBox.children].find(e => e.dataset.msg === msg && !e.dataset.x)
@@ -2840,6 +2966,7 @@ async function dash(skip){
   if (!ST) jobs.push(api('/api/state').then(r => { ST = r }))
   if (TAB === 'node' && !OWN) jobs.push(api('/api/own').then(r => { OWN = r }))
   if (TAB === 'node' && !SET) jobs.push(api('/api/settings').then(r => { SET = r }))
+  if (TAB === 'node' && !CH) jobs.push(api('/api/chains').then(r => { CH = r }))
   if (TAB === 'sub' && !PRF) jobs.push(api('/api/profiles').then(r => { PRF = r }))
   if ((TAB === 'pol' || TAB === 'lib') && !POL) jobs.push(api('/api/policies?pf=' + encodeURIComponent(PF)).then(r => { POL = r }))
   if (jobs.length) await Promise.all(jobs)
@@ -2924,8 +3051,32 @@ function viewNode(){
   h += '<div class="uplist src">'
   h += ST.upstreams.map(upRow).join('') || '<div class="empty">还没有订阅源</div>'
   h += '</div></div>'
+  h += \`<div class="card anim" style="animation-delay:.08s" id="chaincard">\${chainCardInner()}</div>\`
   h += \`<div class="card anim" style="animation-delay:.10s" id="nodecard">\${nodeCardInner()}</div>\`
   return h + '<div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+}
+
+// 链式代理：先连中转、再从中转连落地，出口 IP 是落地的。
+// 单独一块，增删链后只重绘这里。
+function chainCardInner(){
+  const cs = (CH && CH.chains) || []
+  let h = \`<div class="ttl">链式代理<span class="sp"></span>
+    <button class="sm" onclick="editChain(null)">\${icon('plus','s')}新建</button></div>
+    <div class="hint" style="margin:-6px 0 13px">先连中转、再从中转连落地，出口 IP 是<b>落地</b>的。
+      典型用法：自建节点做中转（入口线路好），机场家宽节点做落地（住宅 IP，风控友好）。
+      仅 Clash 与 sing-box 支持，base64 分享链接格式里没有对应写法。</div>\`
+  if (!CH) return h + '<div class="empty">加载中…</div>'
+  h += '<div class="uplist chain">'
+  h += cs.map(c => \`<div class="up chain \${c.enabled===false?'off':''}" data-id="\${c.id}">
+      <span class="dot"></span>
+      <span class="nm">\${esc(c.name)}</span>
+      <span class="u"><span class="hop">\${esc(c.viaName||'?')}</span><span class="arw">→</span><span class="hop \${c.landGone?'gone':''}">\${c.landGone?'落地节点已不存在':esc(c.landName)}</span></span>
+      \${c.warn ? \`<span class="tgt hot" data-tip="\${esc(c.warn)}">协议存疑</span>\` : '<span></span>'}
+      <button class="sw" data-on="\${c.enabled===false?0:1}" data-tip="\${c.enabled===false?'启用':'停用'}" onclick="chainAct('toggle','\${c.id}')"><i></i></button>
+      <button class="ib" data-tip="编辑" onclick="editChain('\${c.id}')">\${icon('edit')}</button>
+      <button class="ib dl" data-tip="删除" onclick="delChain('\${c.id}','\${esc(c.name)}')">\${icon('trash')}</button>
+    </div>\`).join('') || '<div class="empty">还没有链式代理</div>'
+  return h + '</div>'
 }
 
 // 单独一份，增删订阅源后只重绘这一块，不必整页重建
@@ -3618,6 +3769,63 @@ window.resetOwn = async () => {
 }
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
+// ---- 链式代理 ----
+async function reloadChains(msg){
+  const card = document.getElementById('chaincard')
+  if (card) card.classList.add('busy')
+  CH = await api('/api/chains')
+  ST = await api('/api/state')          // 链影响不了节点列表，但策略目标下拉要用最新的
+  if (card) { card.classList.remove('busy'); card.innerHTML = chainCardInner() }
+  if (msg) toast(msg)
+}
+window.chainAct = async (act, id) => {
+  const r = await api('/api/chains', { act, id })
+  if (!r.ok) return toast(r.msg || '操作失败', true)
+  await reloadChains()
+}
+window.delChain = async (id, name) => {
+  if (!await modal({ title:'删除链式代理', desc:\`「\${name}」将被移除。指向它的分流策略会回落到「🚀 节点选择」。\`, ok:'删除', danger:true })) return
+  await api('/api/chains', { act:'del', id })
+  await reloadChains('已删除')
+}
+window.editChain = async (id) => {
+  if (!CH) return
+  const c = (CH.chains || []).find(x => x.id === id) || { name:'', via:'', out:'' }
+  const vias = CH.vias || [], lands = CH.lands || []
+  if (!vias.length || !lands.length) return toast('还没有可用的节点，先添加自有节点或订阅源', true)
+  const html = \`
+    <div class="fg"><label class="lb">名称</label>
+      <input id="cn" value="\${esc(c.name)}" placeholder="如 🔗 AI 家宽链">
+      <div class="hint">这会直接成为客户端里的节点名。</div></div>
+    <div class="fg"><label class="lb">中转（先连这个）</label>
+      \${selectHTML('cv', vias.map(v => ({ v:v.v, label:v.label })), c.via || vias[0].v)}
+      <div class="hint">走它的线路出去。选组的话，组内节点挂了会自动换。</div></div>
+    <div class="fg"><label class="lb">落地（出口 IP 是它）</label>
+      \${selectHTML('co', lands.map(l => ({ v:l.v, label:l.label + (l.warn ? '  ⚠️' : '') })), c.out || lands[0].v)}
+      <div class="hint" id="cow"></div></div>\`
+  const box = await modal({ title: id ? '编辑链式代理' : '新建链式代理', html, ok:'保存', wide:true, onMount: b => {
+    bindSelect(b)
+    // 落地协议不对就当场说，别等用户导进客户端连不上才发现
+    const sync = () => {
+      const v = selValue(b.querySelector('#co'))
+      const l = lands.find(x => x.v === v)
+      b.querySelector('#cow').innerHTML = l && l.warn
+        ? \`<span style="color:var(--warn)">\${esc(l.warn)}</span>\`
+        : '只能选具体节点 —— dialer-proxy 是加在节点上的字段，指向一个组没地方安放。'
+    }
+    b.querySelectorAll('#co .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
+    sync()
+  }})
+  if (!box) return
+  const name = box.querySelector('#cn').value.trim()
+  const via = selValue(box.querySelector('#cv'))
+  const out = selValue(box.querySelector('#co'))
+  if (!name) return toast('给这条链起个名字', true)
+  const r = await api('/api/chains', { act:'save', id, name, via, out })
+  if (!r.ok) return toast(r.msg || '保存失败', true)
+  await reloadChains(id ? '已保存' : '已新建')
+}
+
 window.changePwd = async () => {
   const html = \`
     <div class="fg"><label class="lb">当前密码</label>
