@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1449,6 +1449,39 @@ sec('36. 链式代理的接口契约')
   ok(/base64 分享链接格式里没有对应写法/.test(ui), '说明了 share 格式不支持')
   ok(/dialer-proxy 是加在节点上的字段/.test(ui), '解释了落地为什么只能选具体节点')
   delete KV['chains']
+}
+
+sec('37. 订阅名下发给客户端')
+{
+  // 不给 Content-Disposition 的话，客户端只能从 URL 路径猜名字，
+  // 于是每一份订阅在客户端里都叫「sub」，多开几份根本分不出谁是谁。
+  const cd = T.contentDisposition
+  const isAscii = s => [...s].every(c => c.charCodeAt(0) < 128)
+
+  ok(/attachment;/.test(cd('主订阅')), '是 attachment 型')
+  ok(/filename\*=UTF-8''/.test(cd('主订阅')), '带 RFC 6266 的 filename*')
+  ok(/filename="/.test(cd('主订阅')), '同时留 ASCII 的 filename 给老客户端')
+
+  // HTTP 头值只能是 ASCII，塞进非 ASCII 字符会让整个响应非法
+  const names = ['主订阅', '手机 · 家宽出口', 'MyPhone', '🔗 链式专用', 'Работа', '']
+  const bad = names.filter(n => !isAscii(cd(n)))
+  ok(bad.length === 0, '各种语言与 emoji 都产出纯 ASCII 头' + (bad.length ? '：' + bad[0] : ''))
+
+  const back = s => decodeURIComponent((cd(s).match(/filename\*=UTF-8''(.+)$/) || [])[1] || '')
+  ok(back('手机 · 家宽出口') === '手机 · 家宽出口', '中文名能原样还原')
+  ok(back('🔗 链式专用') === '🔗 链式专用', 'emoji 能原样还原')
+
+  // 引号、分号、反斜杠会截断头部，必须从 ASCII 回退名里剔掉
+  // 取出 filename 的值本身再查，别把闭合引号也算进去
+  const fnVal = (cd('a"b;c\\d').match(/filename="([^"]*)"/) || [])[1]
+  ok(fnVal === 'abcd', `引号/分号/反斜杠被剔出 filename（得到 "${fnVal}"）`)
+  ok(/filename="subscription"/.test(cd('纯中文')), '纯非 ASCII 名回退成 subscription')
+  ok(/filename="MyPhone"/.test(cd('MyPhone')), '纯 ASCII 名直接用作回退')
+  ok(back('') === '订阅' && back('   ') === '订阅', '空名字有兜底')
+  ok(cd('很长'.repeat(100)).length < 700, '超长名字会被截断')
+
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(/'Content-Disposition': contentDisposition\(prof\.name\)/.test(src), '订阅响应用档案名作为下发名')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

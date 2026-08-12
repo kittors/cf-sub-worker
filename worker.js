@@ -493,6 +493,17 @@ async function loadProfiles() {
   return Array.isArray(ps) && ps.length ? ps : DEFAULT_PROFILES
 }
 
+// 订阅名下发给客户端。HTTP 头只能是 ASCII，中文得按 RFC 6266 编码成
+// filename*，同时留一份 ASCII 的 filename 给不认 filename* 的老客户端。
+// 两个都给时，认得 filename* 的客户端会优先用它。
+function contentDisposition(name) {
+  const n = String(name || '').trim().slice(0, 60) || '订阅'
+  // 引号和反斜杠会截断头部，控制字符更是直接让整个响应非法
+  const ascii = n.replace(/[^\x20-\x7E]/g, '').replace(/["\\;]/g, '').trim()
+  const fallback = ascii || 'subscription'
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(n)}`
+}
+
 // ---------- 链式代理 ----------
 // 一条链 = 先连中转，再从中转连落地，出口 IP 是落地的。
 // 典型用法：自建节点做中转（入口线路好、稳），机场家宽节点做落地（住宅 IP，
@@ -1333,7 +1344,10 @@ async function handle(req, event) {
   const h = {
     'Profile-Update-Interval': '12',
     'Cache-Control': 'no-cache',
-    'Subscription-Userinfo': 'upload=0; download=0; total=1073741824000; expire=0'
+    'Subscription-Userinfo': 'upload=0; download=0; total=1073741824000; expire=0',
+    // 客户端拿这个头当配置名显示。不给的话它只能从 URL 路径猜，
+    // 于是每一份订阅在客户端里都叫「sub」，多开几份根本分不出谁是谁。
+    'Content-Disposition': contentDisposition(prof.name)
   }
 
   const [rawOwn, rawPol, lib, set, chains] = await Promise.all([loadOwn(), loadPolicies(), loadLib(), loadSettings(), loadChains()])
