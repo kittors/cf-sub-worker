@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1271,6 +1271,41 @@ sec('33. 修改密码')
   ok(/两次输入的新密码不一致/.test(ui), '要求输两遍，输错了不至于下次登录才发现')
   ok(!/value="\$\{esc\(.*password.*\)\}"/i.test(ui), '页面不回填任何密码值')
   delete KV['auth:password']
+}
+
+sec('34. 直连域名的输入清洗')
+{
+  const exp = String(Date.now() + 3600e3)
+  const cookie = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const save = async directDomains => {
+    const req = new Request('https://x/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ domain: '', directDomains, directIPs: [] }),
+    })
+    const r = await T.apiRoute(req, new URL('https://x/api/settings'), null)
+    return (await r.json()).settings.directDomains
+  }
+
+  // DOMAIN-SUFFIX 本身就含所有子域名，写通配符会生成一条永远匹配不上的规则，
+  // 而且是静默失效 —— 不报错，只是不生效，等发现时早绕远路跑半天了
+  ok((await save(['*.example.com']))[0] === 'example.com', "剥掉 `*.` 前缀")
+  ok((await save(['.example.com']))[0] === 'example.com', '剥掉前导点')
+  ok((await save(['https://tokenhub.example.net/v1/responses']))[0] === 'tokenhub.example.net', '完整 URL 剥成域名')
+  ok((await save(['http://a.example.com:8443/x?y=1#z']))[0] === 'a.example.com', '端口、查询串、锚点一并剥掉')
+  ok((await save(['  Example.COM  ']))[0] === 'example.com', '去空白并转小写')
+  ok((await save(['example.com']))[0] === 'example.com', '正常输入原样保留')
+  const many = await save(['a.com', '', '  ', 'b.com'])
+  ok(many.length === 2 && many.join() === 'a.com,b.com', '空行被丢弃')
+
+  // 清洗后生成的规则必须是能匹配上的那种
+  const SET = { ...T.DEFAULT_SETTINGS, domain: '', directDomains: await save(['*.example.com']), directIPs: [] }
+  const cy = T.genClash(false, [], P, LIB, T.DEFAULT_NODES, SET)
+  ok(/- DOMAIN-SUFFIX,example\.com,DIRECT/.test(cy), '生成的是 DOMAIN-SUFFIX,example.com')
+  ok(!/\*/.test(cy.split('\n').filter(l => l.includes('example.com')).join('')), '规则里不含通配符')
+
+  const ui = T.adminHTML(true, true)
+  ok(/子域名自动包含/.test(ui), '界面上说明了不用写通配符')
+  delete KV['settings']
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -1713,7 +1713,12 @@ async function apiRoute(req, url, event) {
   if (p === '/api/settings') {
     if (req.method === 'POST') {
       const b = await req.json().catch(() => ({}))
-      const host = x => String(x).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[\/:].*$/, '')
+      // 粘完整 URL 是常事，剥到域名为止。
+      // 开头的 `*.` 与 `.` 也要剥掉：DOMAIN-SUFFIX 本身就含所有子域名，
+      // 写成 `*.example.com` 会生成一条永远匹配不上的规则 —— 不报错、静默不生效，
+      // 等发现时早就绕远路跑了半天。
+      const host = x => String(x).trim().toLowerCase()
+        .replace(/^https?:\/\//, '').replace(/[\/:?#].*$/, '').replace(/^\*?\./, '')
       const clean = {
         domain: host(b.domain || ''),
         directDomains: (b.directDomains || []).map(host).filter(Boolean).slice(0, 200),
@@ -3510,7 +3515,9 @@ window.editSettings = async () => {
       <input id="stdm" value="\${esc(st.domain)}" placeholder="sub.example.com">
       <div class="hint">用于 DNS 策略与「访问本站不走代理」的规则，填部署这个 Worker 的域名。</div></div>
     <div class="fg"><label class="lb">额外直连域名（每行一个）</label>
-      <textarea id="stdd" placeholder="api.example.com">\${esc(st.directDomains.join('\\n'))}</textarea></div>
+      <textarea id="stdd" placeholder="api.example.com">\${esc(st.directDomains.join('\\n'))}</textarea>
+      <div class="hint">按域名后缀匹配，子域名自动包含 —— 填 <code>example.com</code> 就等于覆盖了
+        <code>a.example.com</code>，不用写 <code>*.</code>。粘完整网址也行，会自动剥成域名。</div></div>
     <div class="fg"><label class="lb">额外直连 IP（每行一个）</label>
       <textarea id="stip" placeholder="203.0.113.10" style="min-height:70px">\${esc(st.directIPs.join('\\n'))}</textarea>
       <div class="hint">自建节点所在服务器的 IP 建议填这里：程序按 IP 直连时匹配不到域名规则，会被兜底送进代理绕一圈。</div></div>\`
