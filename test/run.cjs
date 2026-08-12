@@ -1375,6 +1375,27 @@ sec('35. 链式代理')
   }
   ok(T.resolveTarget('chain:nonexist', liveKeys, OWN, []) === '🚀 节点选择', '指向不存在的链会回落')
   ok(T.resolveTarget('chain:c1', liveKeys, OWN, [{ id: 'c1', name: '🔗 AI 家宽链' }]) === '🔗 AI 家宽链', 'chain: 目标能解析')
+
+  // 档案可以按机场/地区裁剪节点。落地若恰好被这份档案排除掉，链不能就此消失 ——
+  // 用户是在链式配置里显式选的它，界面上看着好好的、订阅里却没有，最难排查。
+  const trimmed = up.filter(n => n.key !== land.key)
+  ok(!trimmed.find(n => n.key === land.key), '构造出一份不含落地节点的档案视图')
+  const cyT = yaml ? yaml.load(T.genClash(false, trimmed, pol, LIB, OWN, SET, chains, up)) : null
+  if (cyT) {
+    const cn = cyT.proxies.find(p => p.name === '🔗 AI 家宽链')
+    ok(!!cn && cn['dialer-proxy'] === OWN[ownKey].name, '落地被档案排除时，链式节点照样生成')
+    ok(!cyT.proxies.find(p => p.name === land.name), '落地节点本身仍按档案被排除，没被顺带塞回来')
+    const pn = new Set(cyT.proxies.map(p => p.name)), gn = new Set(cyT['proxy-groups'].map(g => g.name)), d3 = []
+    cyT['proxy-groups'].forEach(g => (g.proxies || []).forEach(x => {
+      if (!pn.has(x) && !gn.has(x) && !['DIRECT', 'REJECT'].includes(x)) d3.push(x)
+    }))
+    ok(d3.length === 0, '此时仍无悬空引用')
+  }
+  const sbT = JSON.parse(T.genSB(trimmed, pol, LIB, OWN, SET, chains, up))
+  ok(!!sbT.outbounds.find(o => o.tag === '🔗 AI 家宽链'), 'sing-box 同样不受档案裁剪影响')
+  // 不传 pool 时退回旧行为，老调用方不受影响
+  const cyN = yaml ? yaml.load(T.genClash(false, trimmed, pol, LIB, OWN, SET, chains)) : null
+  if (cyN) ok(!cyN.proxies.find(p => p.name === '🔗 AI 家宽链'), '不传节点池时按传入的 up 判断')
 }
 
 sec('36. 链式代理的接口契约')

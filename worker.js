@@ -504,10 +504,15 @@ async function loadChains() {
 
 // 落地节点必须是具体的某一个：dialer-proxy 是加在节点上的字段，
 // 指向一个组的话没地方安放。中转反过来可以是组，组内挂了会自动换。
-function resolveChains(chains, up, own, liveKeys) {
+//
+// pool 传的是「全部节点」而不是档案筛选后的那批。档案筛选的语义是
+// 「这份订阅里能直接选哪些节点」，而链式是用户在别处显式定义的独立节点，
+// 引用某个落地只为拿它的连接配置。两者混在一起的后果是：在链式里选了一个
+// 恰好被该档案排除的节点，链就静默不生成 —— 界面上看着好好的，订阅里没有。
+function resolveChains(chains, pool, own, liveKeys) {
   const out = []
   const byKey = {}
-  for (const n of up) byKey[n.key] = n
+  for (const n of pool) byKey[n.key] = n
   for (const c of (chains || [])) {
     if (c.enabled === false) continue
     const land = byKey[c.out]
@@ -1339,8 +1344,8 @@ async function handle(req, event) {
   if (fmt === 'share') return new Response(genShare(f.up, f.own), { headers: { ...h, 'Content-Type': 'text/plain; charset=utf-8' } })
   // URL 上的 mode 优先，其次用档案自己的设定
   const mode = url.searchParams.get('mode') || prof.mode || 'whitelist'
-  if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set, chains), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
-  return new Response(genClash(mode === 'blacklist', f.up, f.policies, lib, f.own, set, chains), { headers: { ...h, 'Content-Type': 'text/yaml; charset=utf-8' } })
+  if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
+  return new Response(genClash(mode === 'blacklist', f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'text/yaml; charset=utf-8' } })
 }
 
 // ---------- 管理端路由 ----------
@@ -1945,13 +1950,13 @@ function policyMembers(p, targets, allN, regionNames) {
   return out
 }
 
-function genClash(blacklist, up, policies, lib, own, st, chains) {
+function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   const ownN = Object.values(own).map(n => n.name)
   const upN = up.map(n => n.name)
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
   const liveKeys = liveR.map(r => r.key)
-  const ch = resolveChains(chains, up, own, liveKeys)
+  const ch = resolveChains(chains, pool || up, own, liveKeys)
   const allN = [...ownN, ...upN, ...ch.map(c => c.name)]
   const regionNames = liveR.map(r => `${r.flag} ${r.cn}`)
   const act = (policies || []).filter(p => p.enabled !== false)
@@ -2216,7 +2221,7 @@ function toSB(n) {
   return null
 }
 
-function genSB(up, policies, lib, own, st, chains) {
+function genSB(up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   // 转不出 outbound 的节点必须在这里就整个剔掉，后面所有分组都基于过滤后的 up。
   // 只 filter(Boolean) 掉 outbound、却让地区组继续按全量节点取名字，
@@ -2231,7 +2236,7 @@ function genSB(up, policies, lib, own, st, chains) {
   // 链式 outbound：复制落地节点的 outbound，改 tag，加 detour 指向中转。
   // 落地本身转不出 outbound（协议不认识）时整条链跳过，绝不留悬空引用。
   const chOut = []
-  for (const c of resolveChains(chains, up, own, liveKeys)) {
+  for (const c of resolveChains(chains, pool || up, own, liveKeys)) {
     const o = toSB({ ...c.land, name: c.name })
     if (!o) continue
     o.detour = c.via === 'DIRECT' ? 'direct-out' : c.via === 'REJECT' ? 'block-out' : c.via
