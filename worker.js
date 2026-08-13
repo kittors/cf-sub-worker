@@ -35,6 +35,11 @@ const DEFAULT_SETTINGS = {
   domain: '',        // 本站域名，用于 DNS 策略与直连规则
   directDomains: [], // 额外直连域名
   directIPs: [],     // 额外直连 IP（如自建节点所在服务器，避免按 IP 连接时被兜底送进代理）
+  // 强制走代理的域名。规则生成在所有直连规则之前 —— 命中即停，所以这是唯一能
+  // 从「整个域名直连」里把个别子域名拎出来的位置。
+  // 实际用途：某个子域名在直连路径上被 TLS 劫持（拿到伪造证书、跳转到搜索引擎），
+  // 而同域名下别的服务又必须直连，只能单独把它送去代理。
+  proxyDomains: [],
   dns: DEFAULT_DNS
 }
 async function loadSettings() {
@@ -1866,6 +1871,7 @@ async function apiRoute(req, url, event) {
         directDomains: (b.directDomains || []).map(host).filter(Boolean).slice(0, 200),
         directIPs: (b.directIPs || []).map(x => String(x).trim())
           .filter(x => /^(\d{1,3}\.){3}\d{1,3}$/.test(x)).slice(0, 100),
+        proxyDomains: (b.proxyDomains || []).map(host).filter(Boolean).slice(0, 200),
         dns: cur.dns
       }
       if (b.dns && typeof b.dns === 'object') {
@@ -2048,6 +2054,7 @@ const dnsList = arr => (arr || []).map(x => `    - ${dnsQ(x)}`)
 function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   const D = { ...DEFAULT_DNS, ...(SET.dns || {}) }
+  const FORCED = SET.proxyDomains || []
   const ownN = Object.values(own).map(n => n.name)
   const upN = up.map(n => n.name)
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
@@ -2262,8 +2269,11 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     // 节点服务器 IP 必须直连：程序若直接用 IP 连接（SSH、节点探测）匹配不到下面的域名规则，
     // 会被 MATCH 兜底送进代理绕一圈回来，既慢又可能触发 Reality 握手失败。
     ...SET.directIPs.map(ip => `  - IP-CIDR,${ip}/32,DIRECT,no-resolve`),
-    ...(SET.domain ? [`  - DOMAIN-SUFFIX,${SET.domain},DIRECT`] : []),
-    ...SET.directDomains.map(d => `  - DOMAIN-SUFFIX,${d},DIRECT`),
+    // 强制代理必须排在所有直连规则之前，否则永远轮不到它。
+    // 同名的直连规则一并去掉：留着也永远匹配不到，只会让人以为它还在生效。
+    ...FORCED.map(d => `  - DOMAIN-SUFFIX,${d},🚀 节点选择`),
+    ...(SET.domain && !FORCED.includes(SET.domain) ? [`  - DOMAIN-SUFFIX,${SET.domain},DIRECT`] : []),
+    ...SET.directDomains.filter(d => !FORCED.includes(d)).map(d => `  - DOMAIN-SUFFIX,${d},DIRECT`),
     polRules,
     tail.join('\n')
   ].filter(x => x !== '').join('\n')
@@ -2399,8 +2409,11 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     })
   })
 
-  const direct = [...(SET.domain ? [SET.domain] : []), ...SET.directDomains]
+  const forced = SET.proxyDomains || []
+  const direct = [...(SET.domain ? [SET.domain] : []), ...SET.directDomains].filter(d => !forced.includes(d))
   const rules = []
+  // 与 Clash 那边一致：强制代理排在所有直连规则之前
+  if (forced.length) rules.push({ domain_suffix: forced, outbound: '🚀 节点选择' })
   if (direct.length) rules.push({ domain_suffix: direct, outbound: 'direct-out' })
   if (SET.directIPs.length) rules.push({ ip_cidr: SET.directIPs.map(x => x + '/32'), outbound: 'direct-out' })
   act.forEach(p => {
@@ -3153,6 +3166,8 @@ function viewNode(){
         <span class="u">\${st.directDomains.length ? esc(st.directDomains.join('、')) : '（无）'}</span></div>
       <div class="up"><span class="nm">直连 IP</span>
         <span class="u">\${st.directIPs.length ? esc(st.directIPs.join('、')) : '（无）'}</span></div>
+      <div class="up"><span class="nm">强制代理</span>
+        <span class="u">\${(st.proxyDomains||[]).length ? esc(st.proxyDomains.join('、')) : '（无）'}</span></div>
     </div>
   </div>
   <div class="card anim" style="animation-delay:.03s">
@@ -3823,13 +3838,17 @@ window.editSettings = async () => {
         <code>a.example.com</code>，不用写 <code>*.</code>。粘完整网址也行，会自动剥成域名。</div></div>
     <div class="fg"><label class="lb">额外直连 IP（每行一个）</label>
       <textarea id="stip" placeholder="203.0.113.10" style="min-height:70px">\${esc(st.directIPs.join('\\n'))}</textarea>
-      <div class="hint">自建节点所在服务器的 IP 建议填这里：程序按 IP 直连时匹配不到域名规则，会被兜底送进代理绕一圈。</div></div>\`
+      <div class="hint">自建节点所在服务器的 IP 建议填这里：程序按 IP 直连时匹配不到域名规则，会被兜底送进代理绕一圈。</div></div>
+    <div class="fg"><label class="lb">强制走代理的域名（每行一个）</label>
+      <textarea id="stpx" placeholder="relay.example.com" style="min-height:70px">\${esc((st.proxyDomains||[]).join('\\n'))}</textarea>
+      <div class="hint">规则生成在<b>所有直连规则之前</b>，是唯一能从「整个域名直连」里把个别子域名拎出来的位置。
+        用途：某个子域名在直连时被劫持（证书报错、跳到不相干的网站），而同域名下别的服务又必须直连。</div></div>\`
   const box = await modal({ title:'站点设置', html, ok:'保存', wide:true })
   if (!box) return
   const lines = el => box.querySelector(el).value.split('\\n').map(x => x.trim()).filter(Boolean)
   const r = await api('/api/settings', {
     domain: box.querySelector('#stdm').value.trim(),
-    directDomains: lines('#stdd'), directIPs: lines('#stip')
+    directDomains: lines('#stdd'), directIPs: lines('#stip'), proxyDomains: lines('#stpx')
   })
   if (!r.ok) return toast(r.msg || '保存失败', true)
   SET = { ok:true, settings: r.settings }

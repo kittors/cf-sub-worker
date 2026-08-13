@@ -1680,6 +1680,55 @@ sec('41. sniffer 不得覆盖 TLS 连接的目标地址')
   ok(!/`  override-destination: true`/.test(src), '源码里不再有顶层 override-destination: true')
 }
 
+sec('42. 强制代理域名')
+{
+  // 命中即停，所以这是唯一能从「整个域名直连」里把个别子域名拎出来的位置。
+  // 实际用途：某个子域名在直连路径上被 TLS 劫持（拿到伪造证书、跳转到搜索引擎），
+  // 而同域名下别的服务又必须直连。
+  const st = { ...T.DEFAULT_SETTINGS, domain: 'example.com', directDomains: ['a.example.com'], directIPs: [], proxyDomains: ['relay.example.com'] }
+  const cy = T.genClash(false, [], P, LIB, T.DEFAULT_NODES, st)
+  const L = cy.split('\n'), at = s => L.findIndex(l => l.trim() === s)
+  const pi = at('- DOMAIN-SUFFIX,relay.example.com,🚀 节点选择')
+  const di = at('- DOMAIN-SUFFIX,example.com,DIRECT')
+  const d2 = at('- DOMAIN-SUFFIX,a.example.com,DIRECT')
+  ok(pi > 0, '生成了强制代理规则')
+  ok(pi < di && pi < d2, `强制代理排在所有直连规则之前（${pi} < ${di}, ${d2}）`)
+  const firstPol = L.findIndex(l => /DOMAIN-SUFFIX,youtube\.com/.test(l))
+  ok(pi < firstPol, '也排在策略规则之前')
+
+  // 同一个域名同时出现在两边时，强制代理优先 —— 否则前面那条直连会先命中，等于没配
+  const both = { ...st, directDomains: ['relay.example.com'], proxyDomains: ['relay.example.com'] }
+  const cy2 = T.genClash(false, [], P, LIB, T.DEFAULT_NODES, both)
+  ok(!/- DOMAIN-SUFFIX,relay\.example\.com,DIRECT/.test(cy2), '冲突时不再生成同名的直连规则')
+  ok(/- DOMAIN-SUFFIX,relay\.example\.com,🚀 节点选择/.test(cy2), '保留强制代理规则')
+
+  if (yaml) {
+    const d = yaml.load(cy)
+    const gn = new Set(d['proxy-groups'].map(g => g.name))
+    ok(gn.has('🚀 节点选择'), '指向的组确实存在，不是悬空引用')
+  }
+
+  // sing-box 同样的顺序
+  const sb = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, st))
+  const r0 = sb.route.rules[0]
+  ok(r0 && (r0.domain_suffix || []).includes('relay.example.com') && r0.outbound === '🚀 节点选择', 'sing-box 里也排在第一条')
+  const dr = sb.route.rules.find(r => r.outbound === 'direct-out' && (r.domain_suffix || []).length)
+  ok(dr && !dr.domain_suffix.includes('relay.example.com'), 'sing-box 的直连规则里不含它')
+  const tags = new Set(sb.outbounds.map(o => o.tag)), miss = []
+  sb.route.rules.forEach(r => { if (r.outbound && !tags.has(r.outbound)) miss.push(r.outbound) })
+  ok(miss.length === 0, 'sing-box 无悬空引用' + (miss.length ? '：' + miss[0] : ''))
+
+  // 不配时不该凭空多出规则
+  const none = T.genClash(false, [], P, LIB, T.DEFAULT_NODES, { ...st, proxyDomains: [] })
+  ok(!/🚀 节点选择$/m.test(none.split('rules:')[1].split('\n').slice(1, 4).join('\n')), '不配置时前几条规则里没有强制代理')
+
+  const ui = T.adminHTML(true, true)
+  ok(/强制走代理的域名/.test(ui), '设置弹窗里有这一项')
+  ok(/id="stpx"/.test(ui), '有对应输入框')
+  ok(/proxyDomains: lines\('#stpx'\)/.test(ui), '保存时会提交')
+  ok(/所有直连规则之前/.test(ui), '界面上说明了它的位置')
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
 
