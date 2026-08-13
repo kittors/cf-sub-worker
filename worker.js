@@ -11,14 +11,42 @@ const INIT_TOKEN = typeof SETUP_TOKEN !== 'undefined' ? SETUP_TOKEN : ''
 
 // === 站点设置 ===
 // 全部存 KV，部署后在管理端「设置」里填，代码里不留任何实际站点信息。
+// DNS 归成三组，域名按组指派。直接摊开 mihomo 那一堆字段的话，
+// proxy-server-nameserver 必须直连、respect-rules 不能关这类约束没地方表达，
+// 配错了还很难自己发现 —— 分组能把这些约束固化在生成逻辑里。
+const DNS_GROUPS = [
+  { k: 'remote',    label: '境外 DNS', hint: '解析境外域名。要用加密 DoH，明文查询会被污染' },
+  { k: 'domestic',  label: '国内 DNS', hint: '解析国内域名与直连域名，也用来解析节点服务器地址' },
+  { k: 'bootstrap', label: '引导 DNS', hint: '只用来解析上面那些 DoH 服务器自己的域名，必须填纯 IP' }
+]
+const DEFAULT_DNS = {
+  fakeIp: true,
+  ipv6: true,
+  remote: ['https://dns.cloudflare.com/dns-query', 'https://dns.google/dns-query'],
+  domestic: ['https://223.5.5.5/dns-query', 'https://doh.pub/dns-query'],
+  bootstrap: ['223.5.5.5', '119.29.29.29'],
+  // 本站域名默认走境外组：它多半托管在 Cloudflare、服务器也常在境外，
+  // 交给国内 DNS 可能拿到被污染的地址，再叠加「本站域名直连」就会直连到错误的 IP
+  selfGroup: 'remote',
+  policies: [{ domain: '+.cn', group: 'domestic' }],
+  extraFilter: []    // 追加的 fake-ip-filter，某些应用需要拿到真实 IP
+}
 const DEFAULT_SETTINGS = {
   domain: '',        // 本站域名，用于 DNS 策略与直连规则
   directDomains: [], // 额外直连域名
-  directIPs: []      // 额外直连 IP（如自建节点所在服务器，避免按 IP 连接时被兜底送进代理）
+  directIPs: [],     // 额外直连 IP（如自建节点所在服务器，避免按 IP 连接时被兜底送进代理）
+  dns: DEFAULT_DNS
 }
 async function loadSettings() {
   const v = await kvGet('settings', null)
-  return { ...DEFAULT_SETTINGS, ...(v && typeof v === 'object' ? v : {}) }
+  const s = { ...DEFAULT_SETTINGS, ...(v && typeof v === 'object' ? v : {}) }
+  // dns 是后加的，老配置里没有；缺字段也要能按默认补齐，不能整块塌掉
+  s.dns = { ...DEFAULT_DNS, ...(s.dns && typeof s.dns === 'object' ? s.dns : {}) }
+  for (const g of DNS_GROUPS) if (!Array.isArray(s.dns[g.k]) || !s.dns[g.k].length) s.dns[g.k] = DEFAULT_DNS[g.k]
+  if (!Array.isArray(s.dns.policies)) s.dns.policies = DEFAULT_DNS.policies
+  if (!Array.isArray(s.dns.extraFilter)) s.dns.extraFilter = []
+  if (!DNS_GROUPS.some(g => g.k === s.dns.selfGroup)) s.dns.selfGroup = 'remote'
+  return s
 }
 
 // 自有节点默认为空，在管理端「节点」页添加。
@@ -1832,16 +1860,46 @@ async function apiRoute(req, url, event) {
       // 等发现时早就绕远路跑了半天。
       const host = x => String(x).trim().toLowerCase()
         .replace(/^https?:\/\//, '').replace(/[\/:?#].*$/, '').replace(/^\*?\./, '')
+      const cur = await loadSettings()
       const clean = {
         domain: host(b.domain || ''),
         directDomains: (b.directDomains || []).map(host).filter(Boolean).slice(0, 200),
         directIPs: (b.directIPs || []).map(x => String(x).trim())
-          .filter(x => /^(\d{1,3}\.){3}\d{1,3}$/.test(x)).slice(0, 100)
+          .filter(x => /^(\d{1,3}\.){3}\d{1,3}$/.test(x)).slice(0, 100),
+        dns: cur.dns
+      }
+      if (b.dns && typeof b.dns === 'object') {
+        const d = { ...cur.dns }
+        // DoH 地址或纯 IP，别的形式（比如漏了 https://）会让客户端直接起不来
+        const srv = x => String(x).trim()
+        const okSrv = v => /^https:\/\/[^\s"']+$/.test(v) || /^(\d{1,3}\.){3}\d{1,3}$/.test(v) ||
+                           /^tls:\/\/[^\s"']+$/.test(v) || /^quic:\/\/[^\s"']+$/.test(v) || /^[0-9a-fA-F:]+$/.test(v)
+        for (const g of DNS_GROUPS) {
+          if (!Array.isArray(b.dns[g.k])) continue
+          const list = b.dns[g.k].map(srv).filter(okSrv).slice(0, 8)
+          if (!list.length) return json({ ok: false, msg: `${g.label}至少要有一个有效地址（https:// 开头的 DoH，或纯 IP）` }, 400)
+          // 引导 DNS 只能是纯 IP：它的职责就是解析别的 DoH 域名，自己再依赖域名就成了死循环
+          if (g.k === 'bootstrap' && list.some(v => !/^(\d{1,3}\.){3}\d{1,3}$/.test(v)))
+            return json({ ok: false, msg: '引导 DNS 必须是纯 IP —— 它负责解析其它 DoH 的域名，自己不能再依赖域名解析' }, 400)
+          d[g.k] = list
+        }
+        if (DNS_GROUPS.some(g => g.k === b.dns.selfGroup)) d.selfGroup = b.dns.selfGroup
+        if (typeof b.dns.fakeIp === 'boolean') d.fakeIp = b.dns.fakeIp
+        if (typeof b.dns.ipv6 === 'boolean') d.ipv6 = b.dns.ipv6
+        if (Array.isArray(b.dns.policies)) {
+          d.policies = b.dns.policies
+            .map(x => ({ domain: String((x && x.domain) || '').trim().toLowerCase(), group: String((x && x.group) || '') }))
+            .filter(x => x.domain && DNS_GROUPS.some(g => g.k === x.group)).slice(0, 100)
+        }
+        if (Array.isArray(b.dns.extraFilter)) {
+          d.extraFilter = b.dns.extraFilter.map(x => String(x).trim()).filter(Boolean).slice(0, 100)
+        }
+        clean.dns = d
       }
       await kvPut('settings', clean)
       return json({ ok: true, settings: clean })
     }
-    return json({ ok: true, settings: await loadSettings() })
+    return json({ ok: true, settings: await loadSettings(), dnsGroups: DNS_GROUPS })
   }
 
   // 自有节点：BWG 上自建的节点，与机场订阅无关，独立存 KV
@@ -1978,8 +2036,18 @@ function ownHost(n, st) {
   return ip || n.s
 }
 
+// DoH 地址里有冒号和斜杠，写进 YAML 流式列表要带引号；纯 IP 不用
+function dnsQ(x) {
+  const v = String(x).trim()
+  return /^[\d.]+$/.test(v) ? v : JSON.stringify(v)
+}
+const dnsFlow = arr => (arr || []).map(dnsQ).join(', ')
+const sbDnsTag = g => g === 'domestic' ? 'dns-direct' : g === 'bootstrap' ? 'dns-resolver' : 'dns-remote'
+const dnsList = arr => (arr || []).map(x => `    - ${dnsQ(x)}`)
+
 function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
+  const D = { ...DEFAULT_DNS, ...(SET.dns || {}) }
   const ownN = Object.values(own).map(n => n.name)
   const upN = up.map(n => n.name)
   const liveR = REGIONS.filter(r => up.some(n => n.region === r.key))
@@ -2124,35 +2192,36 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     //   default-nameserver  仅用于解析上面那些 DoH 服务器自身的域名
     `dns:`,
     `  enable: true`,
-    `  ipv6: true`,
-    `  enhanced-mode: fake-ip`,
-    `  fake-ip-range: 198.18.0.1/16`,
-    `  fake-ip-filter:`,
-    `    - "*.lan"`,
-    `    - "*.local"`,
-    `    - "*.localdomain"`,
-    `    - "+.msftconnecttest.com"`,
-    `    - "+.msftncsi.com"`,
-    `    - localhost.ptlogin2.qq.com`,
-    `    - "+.srv.nintendo.net"`,
-    `    - "+.stun.playstation.net"`,
-    `    - "+.xboxlive.com"`,
-    `    - "time.*.com"`,
-    `    - "ntp.*.com"`,
-    `    - "+.pool.ntp.org"`,
-    ...(SET.domain ? [`    - "+.${SET.domain}"`] : []),
+    `  ipv6: ${D.ipv6 !== false}`,
+    `  enhanced-mode: ${D.fakeIp === false ? 'redir-host' : 'fake-ip'}`,
+    ...(D.fakeIp === false ? [] : [
+      `  fake-ip-range: 198.18.0.1/16`,
+      `  fake-ip-filter:`,
+      `    - "*.lan"`,
+      `    - "*.local"`,
+      `    - "*.localdomain"`,
+      `    - "+.msftconnecttest.com"`,
+      `    - "+.msftncsi.com"`,
+      `    - localhost.ptlogin2.qq.com`,
+      `    - "+.srv.nintendo.net"`,
+      `    - "+.stun.playstation.net"`,
+      `    - "+.xboxlive.com"`,
+      `    - "time.*.com"`,
+      `    - "ntp.*.com"`,
+      `    - "+.pool.ntp.org"`,
+      ...(SET.domain ? [`    - "+.${SET.domain}"`] : []),
+      ...(D.extraFilter || []).map(f => `    - "${f}"`)
+    ]),
     `  default-nameserver:`,
-    `    - 223.5.5.5`,
-    `    - 119.29.29.29`,
+    ...dnsList(D.bootstrap),
+    // 解析节点服务器地址必须直连：走代理就和 respect-rules 成了循环依赖
     `  proxy-server-nameserver:`,
-    `    - https://223.5.5.5/dns-query`,
-    `    - https://doh.pub/dns-query`,
+    ...dnsList(D.domestic),
     `  direct-nameserver:`,
-    `    - https://223.5.5.5/dns-query`,
-    `    - https://doh.pub/dns-query`,
+    ...dnsList(D.domestic),
     `  nameserver:`,
-    `    - https://dns.cloudflare.com/dns-query`,
-    `    - https://dns.google/dns-query`,
+    ...dnsList(D.remote),
+    // 关掉会让代理域名的 DNS 查询在本地明文发出，等于白建隧道
     `  respect-rules: true`,
     `  nameserver-policy:`,
     // 本站域名交给国内 DNS 是个陷阱：它多半托管在 Cloudflare、服务器也常在境外，
@@ -2161,10 +2230,11 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     // 浏览器报 ERR_CERT_COMMON_NAME_INVALID，而手机不挂代理反而正常。
     // 用可信 DoH 拿真实地址；拿到之后照样直连，不影响「直连」这件事本身。
     ...(SET.domain ? [
-      `    "+.${SET.domain}": ["https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"]`,
-      `    "${SET.domain}": ["https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"]`
+      `    "+.${SET.domain}": [${dnsFlow(D[D.selfGroup] || D.remote)}]`,
+      `    "${SET.domain}": [${dnsFlow(D[D.selfGroup] || D.remote)}]`
     ] : []),
-    `    "+.cn": [223.5.5.5, 119.29.29.29]`,
+    ...(D.policies || []).filter(p => p && p.domain && D[p.group])
+      .map(p => `    "${p.domain}": [${dnsFlow(D[p.group])}]`),
     ``,
     `proxies:`,
     pl,
@@ -2262,6 +2332,7 @@ function toSB(n) {
 
 function genSB(up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
+  const D = { ...DEFAULT_DNS, ...(SET.dns || {}) }
   // 转不出 outbound 的节点必须在这里就整个剔掉，后面所有分组都基于过滤后的 up。
   // 只 filter(Boolean) 掉 outbound、却让地区组继续按全量节点取名字，
   // 就会引用一堆不存在的 tag —— sing-box 是拒绝加载整份配置，不是跳过那几个。
@@ -2339,21 +2410,28 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     log: { level: 'warn' },
     // DNS 防泄漏：dns-remote 经代理出口查询；dns-resolver 仅直连解析节点域名，
     // 其余交给 fakeip，真实解析在代理节点侧完成。
+    // 与 Clash 共用同一份 DNS 设置，字段名在这里做映射：
+    // remote→dns-remote、domestic→dns-direct、bootstrap→dns-resolver
     dns: {
       servers: [
-        { tag: 'dns-remote', address: 'https://1.1.1.1/dns-query', address_resolver: 'dns-resolver', strategy: 'prefer_ipv4', detour: aiPrimary(own) },
-        { tag: 'dns-direct', address: 'https://223.5.5.5/dns-query', address_resolver: 'dns-resolver', strategy: 'prefer_ipv4', detour: 'direct-out' },
-        { tag: 'dns-resolver', address: '223.5.5.5', detour: 'direct-out' },
+        { tag: 'dns-remote', address: D.remote[0], address_resolver: 'dns-resolver', strategy: 'prefer_ipv4', detour: aiPrimary(own) },
+        { tag: 'dns-direct', address: D.domestic[0], address_resolver: 'dns-resolver', strategy: 'prefer_ipv4', detour: 'direct-out' },
+        { tag: 'dns-resolver', address: D.bootstrap[0], detour: 'direct-out' },
         { tag: 'dns-fake', address: 'fakeip' }
       ],
       rules: [
         { outbound: 'any', server: 'dns-resolver' },
-        ...(SET.domain ? [{ domain_suffix: [SET.domain], server: 'dns-resolver' }] : []),
+        // 本站域名以前写死走 dns-resolver（国内明文），和 Clash 那边是同一个坑
+        ...(SET.domain ? [{ domain_suffix: [SET.domain], server: sbDnsTag(D.selfGroup) }] : []),
+        ...(D.policies || []).filter(p => p && p.domain && D[p.group]).map(p => ({
+          domain_suffix: [String(p.domain).replace(/^\+\./, '').replace(/^\*\./, '')],
+          server: sbDnsTag(p.group)
+        })),
         { query_type: ['A','AAAA'], server: 'dns-fake' }
       ],
       final: 'dns-remote',
       independent_cache: true,
-      fakeip: { enabled: true, inet4_range: '198.18.0.0/15' }
+      ...(D.fakeIp === false ? {} : { fakeip: { enabled: true, inet4_range: '198.18.0.0/15' } })
     },
     inbounds: [{ type: 'mixed', tag: 'in', listen: '127.0.0.1', listen_port: 2080, sniff: true }],
     outbounds,
@@ -3071,6 +3149,13 @@ function viewNode(){
       <div class="up"><span class="nm">直连 IP</span>
         <span class="u">\${st.directIPs.length ? esc(st.directIPs.join('、')) : '（无）'}</span></div>
     </div>
+  </div>
+  <div class="card anim" style="animation-delay:.03s">
+    <div class="ttl">DNS<span class="sp"></span>
+      <button class="g sm" onclick="editDns()">\${icon('edit','s')}编辑</button></div>
+    <div class="hint" style="margin:-6px 0 13px">决定各类域名分别用哪个 DNS 解析。
+      解析错了会直连到错误的地址 —— 表现是证书报错、跳到不相干的网站，而手机不挂代理反而正常。</div>
+    \${dnsCardInner()}
   </div>\`
   const ow = (OWN && OWN.own) || {}
   h += \`<div class="card anim" style="animation-delay:.06s">
@@ -3099,6 +3184,23 @@ function viewNode(){
   h += \`<div class="card anim" style="animation-delay:.08s" id="chaincard">\${chainCardInner()}</div>\`
   h += \`<div class="card anim" style="animation-delay:.10s" id="nodecard">\${nodeCardInner()}</div>\`
   return h + '<div class="foot anim" style="animation-delay:.14s">节点每小时自动刷新，上游故障时沿用缓存</div>'
+}
+
+function dnsCardInner(){
+  const st = (SET && SET.settings) || {}
+  const d = st.dns || {}
+  const groups = (SET && SET.dnsGroups) || []
+  const gl = k => (groups.find(g => g.k === k) || {}).label || k
+  const row = (k, v) => \`<div class="up"><span class="nm">\${esc(k)}</span><span class="u">\${v}</span></div>\`
+  let h = '<div class="uplist" style="grid-template-columns:auto minmax(0,1fr)">'
+  for (const g of groups) h += row(g.label, esc(((d[g.k] || []).join('、')) || '（未设置）'))
+  h += row('本站域名走', \`<b>\${esc(gl(d.selfGroup))}</b>\`)
+  const pol = (d.policies || []).map(p => \`\${esc(p.domain)} → \${esc(gl(p.group))}\`).join('　·　')
+  h += row('域名指派', pol || '（无）')
+  h += row('解析模式', (d.fakeIp === false ? 'redir-host（真实 IP）' : 'fake-ip')
+    + '　·　IPv6 ' + (d.ipv6 === false ? '关' : '开')
+    + ((d.extraFilter || []).length ? '　·　额外不走 fake-ip：' + esc(d.extraFilter.join('、')) : ''))
+  return h + '</div>'
 }
 
 // 链式代理：先连中转、再从中转连落地，出口 IP 是落地的。
@@ -3814,6 +3916,67 @@ window.resetOwn = async () => {
 }
 
 window.logout = async () => { if (await modal({title:'退出登录', desc:'下次进入需要重新输入管理密码。', ok:'退出'})) location.href = '/admin/logout' }
+window.editDns = async () => {
+  const st = (SET && SET.settings) || {}
+  const d = { ...(st.dns || {}) }
+  const groups = (SET && SET.dnsGroups) || []
+  if (!groups.length) return toast('DNS 配置未加载', true)
+  const ta = (id, arr, ph) => \`<textarea id="\${id}" placeholder="\${ph}" style="min-height:66px">\${esc((arr||[]).join('\\n'))}</textarea>\`
+  const polRow = (p, i) => \`<div class="row" data-pi="\${i}" style="gap:8px;margin-bottom:6px">
+    <input class="pdm" value="\${esc(p.domain)}" placeholder="+.example.com" style="flex:1">
+    \${selectHTML('pg' + i, groups.map(g => ({ v:g.k, label:g.label })), p.group)}
+    <button class="ib dl" data-tip="删除" onclick="this.closest('[data-pi]').remove()">\${icon('trash')}</button></div>\`
+  const html = \`
+    \${groups.map(g => \`<div class="fg"><label class="lb">\${g.label}（每行一个）</label>
+      \${ta('dg_' + g.k, d[g.k], g.k === 'bootstrap' ? '223.5.5.5' : 'https://dns.example.com/dns-query')}
+      <div class="hint">\${esc(g.hint)}</div></div>\`).join('')}
+    <div class="fg"><label class="lb">本站域名用哪组解析</label>
+      \${selectHTML('dself', groups.map(g => ({ v:g.k, label:g.label })), d.selfGroup || 'remote')}
+      <div class="hint">本站域名若托管在 Cloudflare、服务器又在境外，交给国内 DNS 可能拿到被污染的地址；
+        再叠加「本站域名直连」就会直连到错误的 IP，浏览器报证书错误。默认走境外组。</div></div>
+    <div class="fg"><label class="lb">域名指派</label>
+      <div id="dpol">\${(d.policies || []).map(polRow).join('')}</div>
+      <button class="g sm" type="button" onclick="addDnsPol()">\${icon('plus','s')}添加一条</button>
+      <div class="hint">指定某类域名固定用哪组 DNS。写法同 mihomo：<code>+.cn</code> 含所有子域名。</div></div>
+    <div class="fg"><label class="lb">解析模式</label>
+      <div class="row"><button class="sw" id="dfake" data-on="\${d.fakeIp === false ? 0 : 1}"><i></i></button>
+        <span class="hint" style="margin:0">开启 fake-ip（推荐）。关掉则用 redir-host 返回真实 IP，兼容性好但会慢一些。</span></div>
+      <div class="row" style="margin-top:8px"><button class="sw" id="dv6" data-on="\${d.ipv6 === false ? 0 : 1}"><i></i></button>
+        <span class="hint" style="margin:0">解析 IPv6（AAAA）记录。</span></div></div>
+    <div class="fg"><label class="lb">额外不走 fake-ip 的域名（每行一个）</label>
+      \${ta('dfilter', d.extraFilter, 'example.com')}
+      <div class="hint">某些应用要拿到真实 IP 才能工作（如部分游戏、内网服务）。本站域名已自动在列。</div></div>\`
+  const box = await modal({ title:'DNS 设置', html, ok:'保存', wide:true, onMount: b => { bindSelect(b); window.__dnsBox = b } })
+  if (!box) return
+  const lines = sel => [...box.querySelectorAll(sel)].map(e => e.value).join('\\n').split('\\n').map(s => s.trim()).filter(Boolean)
+  const next = {
+    selfGroup: selValue(box.querySelector('#dself')),
+    fakeIp: box.querySelector('#dfake').dataset.on === '1',
+    ipv6: box.querySelector('#dv6').dataset.on === '1',
+    extraFilter: lines('#dfilter'),
+    policies: [...box.querySelectorAll('#dpol [data-pi]')].map(r => ({
+      domain: r.querySelector('.pdm').value.trim(),
+      group: selValue(r.querySelector('.sel'))
+    })).filter(x => x.domain)
+  }
+  for (const g of groups) next[g.k] = lines('#dg_' + g.k)
+  const r = await api('/api/settings', { ...st, dns: next })
+  if (!r.ok) return toast(r.msg || '保存失败', true)
+  SET = { ok:true, settings: r.settings, dnsGroups: groups }
+  toast('DNS 设置已保存'); dash(true)
+}
+window.addDnsPol = () => {
+  const b = window.__dnsBox
+  if (!b) return
+  const groups = (SET && SET.dnsGroups) || []
+  const i = 'n' + Date.now()
+  b.querySelector('#dpol').insertAdjacentHTML('beforeend', \`<div class="row" data-pi="\${i}" style="gap:8px;margin-bottom:6px">
+    <input class="pdm" placeholder="+.example.com" style="flex:1">
+    \${selectHTML('pg' + i, groups.map(g => ({ v:g.k, label:g.label })), groups[0].k)}
+    <button class="ib dl" data-tip="删除" onclick="this.closest('[data-pi]').remove()">\${icon('trash')}</button></div>\`)
+  bindSelect(b)
+}
+
 // ---- 链式代理 ----
 async function reloadChains(msg){
   const card = document.getElementById('chaincard')

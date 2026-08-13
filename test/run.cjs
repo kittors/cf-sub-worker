@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1519,6 +1519,129 @@ sec('38. 本站域名的 DNS 解析必须可信')
     const keys = Object.keys(bare.dns['nameserver-policy'])
     ok(keys.length === 1 && keys[0] === '+.cn', '未设本站域名时只剩 +.cn')
   }
+}
+
+sec('39. DNS 可在管理端配置')
+{
+  const mk = dns => ({ ...T.DEFAULT_SETTINGS, domain: 'example.com', dns: { ...T.DEFAULT_DNS, ...dns } })
+  const load = st => yaml ? yaml.load(T.genClash(false, [], P, LIB, T.DEFAULT_NODES, st)) : null
+
+  // 默认值必须与修复后的行为一致：本站域名走境外 DoH
+  const d0 = load(mk({}))
+  if (d0) {
+    ok(d0.dns['nameserver-policy']['+.example.com'].every(s => /^https:/.test(s)), '默认本站域名走加密 DoH')
+    ok(d0.dns.nameserver.join().includes('cloudflare'), '默认境外组')
+    ok(d0.dns['default-nameserver'].every(s => /^[\d.]+$/.test(s)), '引导组是纯 IP')
+  }
+
+  // 三组都能改
+  const d1 = load(mk({ remote: ['https://doh.opendns.com/dns-query'], domestic: ['https://doh.360.cn/dns-query'], bootstrap: ['114.114.114.114'] }))
+  if (d1) {
+    ok(d1.dns.nameserver[0] === 'https://doh.opendns.com/dns-query', '境外组可改')
+    ok(d1.dns['direct-nameserver'][0] === 'https://doh.360.cn/dns-query', '国内组可改')
+    ok(d1.dns['proxy-server-nameserver'][0] === 'https://doh.360.cn/dns-query', '节点解析跟随国内组')
+    ok(d1.dns['default-nameserver'][0] === '114.114.114.114', '引导组可改')
+  }
+
+  // 本站域名可指派到别的组 —— 这次故障就是这一条配错了
+  const d2 = load(mk({ selfGroup: 'domestic' }))
+  if (d2) ok(d2.dns['nameserver-policy']['+.example.com'].join().includes('223.5.5.5'), '本站域名可改走国内组')
+
+  // 域名指派表
+  const d3 = load(mk({ policies: [{ domain: '+.cn', group: 'domestic' }, { domain: '+.test.org', group: 'remote' }] }))
+  if (d3) {
+    const np = d3.dns['nameserver-policy']
+    ok(np['+.test.org'] && np['+.test.org'].join().includes('cloudflare'), '自定义指派生效')
+    ok(Object.keys(np).length === 4, '本站两条 + 自定义两条')
+  }
+  // 指向不存在的组要被忽略，不能生成一条空列表
+  const d4 = load(mk({ policies: [{ domain: '+.bad', group: '不存在' }] }))
+  if (d4) ok(!d4.dns['nameserver-policy']['+.bad'], '指向未知分组的条目被丢弃')
+
+  // fake-ip 与 IPv6 开关
+  const d5 = load(mk({ fakeIp: false, ipv6: false }))
+  if (d5) {
+    ok(d5.dns['enhanced-mode'] === 'redir-host', '可切到 redir-host')
+    ok(!d5.dns['fake-ip-filter'], '关掉 fake-ip 后不再下发过滤表')
+    ok(d5.dns.ipv6 === false, 'IPv6 可关')
+  }
+  const d6 = load(mk({ extraFilter: ['game.example.com'] }))
+  if (d6) ok((d6.dns['fake-ip-filter'] || []).includes('game.example.com'), '额外 fake-ip-filter 生效')
+
+  // 这两条有强约束，不随配置动摇
+  const d7 = load(mk({ remote: ['https://x.example/dns-query'] }))
+  if (d7) {
+    ok(d7.dns['respect-rules'] === true, 'respect-rules 恒为 true，防 DNS 泄漏')
+    ok(d7.dns['proxy-server-nameserver'].join() !== d7.dns.nameserver.join(), '节点解析不跟境外组走，避免循环依赖')
+  }
+
+  // sing-box 共用同一份配置
+  const sb = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ remote: ['https://doh.opendns.com/dns-query'], bootstrap: ['114.114.114.114'] })))
+  const byTag = {}
+  sb.dns.servers.forEach(s => { byTag[s.tag] = s })
+  ok(byTag['dns-remote'].address === 'https://doh.opendns.com/dns-query', 'sing-box 境外 DNS 跟随配置')
+  ok(byTag['dns-resolver'].address === '114.114.114.114', 'sing-box 引导 DNS 跟随配置')
+  const selfRule = sb.dns.rules.find(r => (r.domain_suffix || []).includes('example.com'))
+  ok(selfRule && selfRule.server === 'dns-remote', 'sing-box 本站域名同样走境外组（此前写死为国内明文）')
+  const sb2 = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ selfGroup: 'domestic' })))
+  ok(sb2.dns.rules.find(r => (r.domain_suffix || []).includes('example.com')).server === 'dns-direct', 'sing-box 本站域名分组可改')
+  const sb3 = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ fakeIp: false })))
+  ok(!sb3.dns.fakeip, 'sing-box 关掉 fake-ip')
+
+  // 老配置里没有 dns 字段，不能整块塌掉
+  const legacy = { domain: 'example.com', directDomains: [], directIPs: [] }
+  const dL = yaml ? yaml.load(T.genClash(false, [], P, LIB, T.DEFAULT_NODES, legacy)) : null
+  if (dL) ok(dL.dns.nameserver.length > 0 && dL.dns['nameserver-policy']['+.example.com'], '老配置缺 dns 字段时按默认补齐')
+}
+
+sec('40. DNS 设置的接口校验')
+{
+  const exp = String(Date.now() + 3600e3)
+  const cookie = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const save = async dns => {
+    const req = new Request('https://x/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ domain: 'example.com', directDomains: [], directIPs: [], dns }),
+    })
+    const r = await T.apiRoute(req, new URL('https://x/api/settings'), null)
+    return { status: r.status, body: await r.json() }
+  }
+  delete KV['settings']
+
+  let r = await save({ remote: ['https://doh.opendns.com/dns-query'] })
+  ok(r.body.ok && r.body.settings.dns.remote[0] === 'https://doh.opendns.com/dns-query', '合法 DoH 可保存')
+
+  // 漏了 https:// 的地址会让客户端直接起不来
+  r = await save({ remote: ['dns.example.com'] })
+  ok(!r.body.ok && /有效地址/.test(r.body.msg), '非法地址被拒')
+  // 清空某组要当场拒绝。静默沿用原值的话，用户明明清空了却还在生效，更难理解
+  r = await save({ remote: [] })
+  ok(!r.body.ok && /至少要有一个/.test(r.body.msg), '清空某组会被拒绝')
+  // 完全不带某组则保持原样
+  r = await save({ domestic: ['https://doh.pub/dns-query'] })
+  ok(r.body.ok && r.body.settings.dns.remote.length > 0, '未提交的组保持原值')
+
+  // 引导 DNS 自己再依赖域名解析就成了死循环
+  r = await save({ bootstrap: ['https://dns.google/dns-query'] })
+  ok(!r.body.ok && /纯 IP/.test(r.body.msg), '引导 DNS 填 DoH 被拒')
+  r = await save({ bootstrap: ['8.8.8.8'] })
+  ok(r.body.ok && r.body.settings.dns.bootstrap[0] === '8.8.8.8', '引导 DNS 填 IP 可保存')
+
+  r = await save({ selfGroup: '乱填' })
+  ok(r.body.ok && r.body.settings.dns.selfGroup !== '乱填', '未知分组名被忽略')
+  r = await save({ policies: [{ domain: '+.cn', group: 'domestic' }, { domain: '', group: 'remote' }, { domain: '+.x', group: '无此组' }] })
+  ok(r.body.ok && r.body.settings.dns.policies.length === 1, '空域名与未知分组的指派被丢弃')
+  r = await save({ fakeIp: false, ipv6: false })
+  ok(r.body.ok && r.body.settings.dns.fakeIp === false && r.body.settings.dns.ipv6 === false, '开关可保存')
+
+  // 保存 DNS 不能把其它设置冲掉
+  ok(r.body.settings.domain === 'example.com', '同时保存的站点设置仍在')
+
+  const ui = T.adminHTML(true, true)
+  ok(/function dnsCardInner/.test(ui), '管理端有 DNS 卡片')
+  ok(/window\.editDns/.test(ui), '有编辑入口')
+  ok(/引导 DNS 必须是纯 IP|自己不能再依赖域名解析|必须填纯 IP/.test(ui) || /bootstrap/.test(ui), '界面上说明了引导 DNS 的约束')
+  delete KV['settings']
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
