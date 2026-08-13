@@ -1644,6 +1644,24 @@ sec('40. DNS 设置的接口校验')
   delete KV['settings']
 }
 
+sec('41. sniffer 不得覆盖 TLS 连接的目标地址')
+{
+  // override-destination 会让 Clash「用嗅探到的域名重新解析、覆盖目标地址」。
+  // 客户端本来已经解析对了，再解析一次反而可能拿到被污染的结果，
+  // 连过去就是别人的服务器 —— 证书不匹配、跳转到搜索引擎，而绕过代理直连反而正常。
+  // 官方默认也是顶层 false，只在 HTTP 段开。
+  const d = yaml ? yaml.load(T.genClash(false, [], P, LIB, T.DEFAULT_NODES,
+    { ...T.DEFAULT_SETTINGS, domain: 'example.com' })) : null
+  if (d) {
+    ok(d.sniffer['override-destination'] === false, '顶层 override-destination 为 false')
+    ok(d.sniffer.enable === true, '嗅探本身照常开启 —— 关掉它 DOMAIN 规则会静默失效')
+    ok(d.sniffer.sniff.TLS && !('override-destination' in d.sniffer.sniff.TLS), 'TLS 段不单独打开覆盖')
+    ok((d.sniffer['skip-domain'] || []).includes('+.example.com'), '本站域名在 skip-domain 里')
+  }
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(!/`  override-destination: true`/.test(src), '源码里不再有顶层 override-destination: true')
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
 

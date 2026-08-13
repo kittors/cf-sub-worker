@@ -2170,7 +2170,11 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `  enable: true`,
     `  force-dns-mapping: true`,
     `  parse-pure-ip: true`,
-    `  override-destination: true`,
+    // 顶层保持 false（官方默认）。设成 true 会让 TLS 连接也「用嗅探到的域名
+    // 重新解析、覆盖目标地址」—— 客户端本来已经解析对了，再解析一次反而可能
+    // 拿到被污染的结果，连过去就是别人的服务器：证书不匹配、跳转到搜索引擎。
+    // 嗅探本身照常进行，规则匹配仍然拿得到域名，分流不受影响。
+    `  override-destination: false`,
     `  sniff:`,
     `    HTTP:`,
     `      ports: [80, 8080-8880]`,
