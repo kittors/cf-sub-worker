@@ -585,6 +585,24 @@ sec('18. 源码不含站点信息（开源前置检查）')
   const doms = (all.match(/\b[a-z0-9-]+\.(xyz|top|com|net|org|cc|io|me|cn)\b/gi) || [])
     .filter(d => !/(example\.(com|invalid|org|net)|\.example\.invalid|apple\.com|google\.com|microsoft\.com|cloudflare\.com|gstatic\.com|doh\.pub|bing\.com|dns\.google|github\.(com|io)|npmjs\.com|youtube\.com|netflix\.com|openai\.com|anthropic\.com|claude\.ai)/i.test(d))
   ok(doms.length < 400, '域名均为公开服务或示例（' + doms.length + ' 项非白名单，均属分流规则库）')
+
+  // 上面那条只看总数，硬编码的私有域名混在几百条分流规则库里根本看不出来。
+  // 真正危险的是写进「生成逻辑」的域名 —— 分流库是纯数据，而生成逻辑里的域名
+  // 一定出现在模板字符串里。曾经有一条 `- "+.某人的域名"` 就这么混过了检查并推上公开仓库。
+  const TMPL_OK = /(example\.(com|invalid|org|net)|apple\.com|bing\.com|google\.com|dns\.google|cloudflare\.com|gstatic\.com|doh\.pub|alidns\.com|opendns\.com|360\.cn|msftconnecttest\.com|msftncsi\.com|nintendo\.net|playstation\.net|xboxlive\.com|pool\.ntp\.org|ptlogin2\.qq\.com|livekit\.cloud|baidu\.com)/i
+  const inTemplate = []
+  for (const line of src.split('\n')) {
+    if (!line.includes('`')) continue                    // 只看模板字符串所在的行
+    if (/^\s*\/\//.test(line)) continue                  // 注释里提到域名不算
+    // 限定真实 TLD，否则 `parts.push` 这种方法调用也会被当成域名
+    const TLD = '(com|net|org|xyz|top|cc|io|me|site|online|shop|club|vip|pro|life|fun|cn|dev|app|cloud|ai|co|tv|info|biz|invalid|local|lan)'
+    for (const d of (line.match(new RegExp('\\b(?:[a-z0-9-]+\\.)+' + TLD + '\\b', 'gi')) || [])) {
+      if (TMPL_OK.test(d)) continue
+      if (/\$\{/.test(line) && line.indexOf('${') < line.indexOf(d)) continue   // ${SET.domain} 这类动态拼接
+      inTemplate.push(d + '  ← ' + line.trim().slice(0, 72))
+    }
+  }
+  ok(inTemplate.length === 0, '生成逻辑里无硬编码私有域名' + (inTemplate.length ? '：' + inTemplate[0] : ''))
   // 站点配置必须来自 KV，不能是代码常量
   ok(/const DEFAULT_NODES = \{\}/.test(src), '自有节点默认为空')
   ok(src.includes('async function loadSettings'), '站点设置从 KV 读取')

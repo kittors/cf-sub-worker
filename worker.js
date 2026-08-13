@@ -2188,7 +2188,8 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `    - "+.apple.com"`,
     `    - "Mijia Cloud"`,
     `    - "+.bing.com"`,
-    `    - "+.${SET.domain}"`,
+    // 本站域名跳过嗅探：它已经走真实解析、也已经是直连，再嗅探一道没有意义
+    ...(SET.domain ? [`    - "+.${SET.domain}"`] : []),
     ``,
     // DNS 防泄漏要点：
     //   respect-rules  代理域名的 DNS 查询跟随规则走代理出口，不在本地明文发出
