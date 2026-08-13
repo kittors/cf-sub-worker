@@ -1355,7 +1355,7 @@ async function handle(req, event) {
 
   // 链式节点是 Clash / sing-box 专有能力，分享链接格式里没有对应表达，
   // 只能整条略过 —— 硬塞一个落地节点进去会变成不带中转的直连，出口 IP 全变。
-  if (fmt === 'share') return new Response(genShare(f.up, f.own), { headers: { ...h, 'Content-Type': 'text/plain; charset=utf-8' } })
+  if (fmt === 'share') return new Response(genShare(f.up, f.own, set), { headers: { ...h, 'Content-Type': 'text/plain; charset=utf-8' } })
   // URL 上的 mode 优先，其次用档案自己的设定
   const mode = url.searchParams.get('mode') || prof.mode || 'whitelist'
   if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
@@ -1964,6 +1964,20 @@ function policyMembers(p, targets, allN, regionNames) {
   return out
 }
 
+function looksIP(s) {
+  s = String(s || '')
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(s) || s.includes(':')
+}
+
+// 自有节点若填域名，拨号改走 settings.directIPs[0]。
+// Clash TUN 解析节点域名会脏（假 IP / 过期 A 记录），两个节点共用一个域名就会一起 timeout。
+// ponytail: 自有节点都在同一台机；多机再给节点加独立 ip 字段。
+function ownHost(n, st) {
+  if (looksIP(n.s)) return n.s
+  const ip = ((st && st.directIPs) || [])[0]
+  return ip || n.s
+}
+
 function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
   const ownN = Object.values(own).map(n => n.name)
@@ -1981,7 +1995,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
       pl += [
         `  - name: "${n.name}"`,
         `    type: vless`,
-        `    server: ${n.s}`,
+        `    server: ${ownHost(n, SET)}`,
         `    port: ${n.p}`,
         `    uuid: ${n.u}`,
         `    tls: true`,
@@ -2000,7 +2014,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
       pl += [
         `  - name: "${n.name}"`,
         `    type: hysteria2`,
-        `    server: ${n.s}`,
+        `    server: ${ownHost(n, SET)}`,
         `    port: ${n.p}`,
         ...(n.ports ? [`    ports: ${n.ports}`] : []),
         `    password: ${n.u}`,
@@ -2101,6 +2115,8 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `    - "+.push.apple.com"`,
     `    - "+.apple.com"`,
     `    - "Mijia Cloud"`,
+    `    - "+.bing.com"`,
+    `    - "+.${SET.domain}"`,
     ``,
     // DNS 防泄漏要点：
     //   respect-rules  代理域名的 DNS 查询跟随规则走代理出口，不在本地明文发出
@@ -2124,6 +2140,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `    - "time.*.com"`,
     `    - "ntp.*.com"`,
     `    - "+.pool.ntp.org"`,
+    ...(SET.domain ? [`    - "+.${SET.domain}"`] : []),
     `  default-nameserver:`,
     `    - 223.5.5.5`,
     `    - 119.29.29.29`,
@@ -2138,7 +2155,15 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `    - https://dns.google/dns-query`,
     `  respect-rules: true`,
     `  nameserver-policy:`,
-    ...(SET.domain ? [`    "${SET.domain}": [223.5.5.5, 119.29.29.29]`] : []),
+    // 本站域名交给国内 DNS 是个陷阱：它多半托管在 Cloudflare、服务器也常在境外，
+    // 国内 DNS 对这类域名的返回可能是被污染的 —— 实测所有子域名会解析到同一个
+    // 无关 IP，配上「本站域名直连」这条规则，直连过去拿到的就是别人的证书，
+    // 浏览器报 ERR_CERT_COMMON_NAME_INVALID，而手机不挂代理反而正常。
+    // 用可信 DoH 拿真实地址；拿到之后照样直连，不影响「直连」这件事本身。
+    ...(SET.domain ? [
+      `    "+.${SET.domain}": ["https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"]`,
+      `    "${SET.domain}": ["https://dns.cloudflare.com/dns-query", "https://dns.google/dns-query"]`
+    ] : []),
     `    "+.cn": [223.5.5.5, 119.29.29.29]`,
     ``,
     `proxies:`,
@@ -2270,11 +2295,11 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     ...Object.values(own).map(n => {
       if (n.type === 'vless') {
         if (n.net === 'tcp') {
-          return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, flow: n.flow, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'tcp' } }
+          return { type: 'vless', tag: n.name, server: ownHost(n, SET), server_port: n.p, uuid: n.u, flow: n.flow, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'tcp' } }
         }
-        return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, flow: '', packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'xhttp', path: '/', mode: 'auto' } }
+        return { type: 'vless', tag: n.name, server: ownHost(n, SET), server_port: n.p, uuid: n.u, flow: '', packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'xhttp', path: '/', mode: 'auto' } }
       }
-      return { type: 'hysteria2', tag: n.name, server: n.s, server_port: n.p, password: n.u, obfs: { type: n.obfs, password: n.opwd }, tls: { enabled: true, server_name: n.sni, insecure: true } }
+      return { type: 'hysteria2', tag: n.name, server: ownHost(n, SET), server_port: n.p, password: n.u, obfs: { type: n.obfs, password: n.opwd }, tls: { enabled: true, server_name: n.sni, insecure: true } }
     }),
     ...upOut,
     ...chOut
@@ -2427,8 +2452,9 @@ function shareLink(n) {
   return null
 }
 
-function genShare(up, ownCfg) {
-  const own = Object.values(ownCfg || {}).map(o => ({ name: o.name, own: true, o }))
+function genShare(up, ownCfg, st) {
+  const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
+  const own = Object.values(ownCfg || {}).map(o => ({ name: o.name, own: true, o: { ...o, s: ownHost(o, SET) } }))
   const links = [...own, ...up].map(shareLink).filter(Boolean)
   return b64utf8(links.join('\n'))
 }

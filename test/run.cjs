@@ -68,7 +68,13 @@ if (cd) {
   ok(badRule.length === 0, '规则目标无悬空' + (badRule.length ? ': ' + badRule.slice(0,3) : ''))
   ok(cd.rules[cd.rules.length - 1].startsWith('MATCH,'), '最后一条是 MATCH 兜底')
   ok(cd.sniffer && cd.sniffer.enable === true, 'sniffer 已开启')
+  const skip = (cd.sniffer['skip-domain'] || []).join(' ')
+  ok(/bing\.com/.test(skip), 'sniffer 跳过 bing SNI，避免 Reality 被改写到真 Bing')
   ok(cd.dns['respect-rules'] === true, 'DNS respect-rules 已开启')
+  const ownA = (cd.proxies || []).find(p => p.name === OWN.usV2.name)
+  const ownB = (cd.proxies || []).find(p => p.name === OWN.usH.name)
+  ok(ownA && ownA.server === SET.directIPs[0], '自有 VLESS 拨号走 directIP，不解析节点域名')
+  ok(ownB && ownB.server === SET.directIPs[0], '自有 Hy2 拨号走 directIP，不解析节点域名')
 
   // 规则优先级
   const idx = d => cd.rules.findIndex(r => r.startsWith(`DOMAIN-SUFFIX,${d},`))
@@ -1482,6 +1488,37 @@ sec('37. 订阅名下发给客户端')
 
   const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
   ok(/'Content-Disposition': contentDisposition\(prof\.name\)/.test(src), '订阅响应用档案名作为下发名')
+}
+
+sec('38. 本站域名的 DNS 解析必须可信')
+{
+  // 把本站域名交给国内 DNS 是个陷阱：它多半托管在 Cloudflare、服务器也常在境外，
+  // 国内 DNS 对这类域名的返回可能被污染 —— 实测所有子域名解析到同一个无关 IP。
+  // 再配上「本站域名直连」这条规则，直连过去拿到的就是别人的证书，
+  // 浏览器报 ERR_CERT_COMMON_NAME_INVALID，而手机不挂代理反而正常。
+  const st = { ...T.DEFAULT_SETTINGS, domain: 'example.com', directDomains: [], directIPs: [] }
+  const cy = T.genClash(false, [], P, LIB, T.DEFAULT_NODES, st)
+  const d = yaml ? yaml.load(cy) : null
+  if (d) {
+    const np = d.dns['nameserver-policy']
+    const mine = np['+.example.com']
+    ok(!!mine, '本站域名有独立的 DNS 策略')
+    ok(mine.every(s => /^https:\/\//.test(s)), '本站域名一律走加密 DoH：' + JSON.stringify(mine))
+    ok(!mine.some(s => /223\.5\.5\.5|119\.29\.29\.29|114\.114/.test(s)), '不再交给国内明文 DNS')
+    ok(!!np['example.com'], '裸域也有同样的策略')
+    // 国内域名继续用国内 DNS，那是对的，不能一起改掉
+    ok((np['+.cn'] || []).some(s => /223\.5\.5\.5/.test(s)), '+.cn 仍用国内 DNS')
+    // 换了 DNS 不等于换了路由：这个域名照样直连
+    ok(/DOMAIN-SUFFIX,example\.com,DIRECT/.test(cy), '本站域名仍然是直连')
+    ok((d.dns['fake-ip-filter'] || []).includes('+.example.com'), '本站域名仍不走 fake-ip')
+  }
+  // 没设本站域名时不该凭空多出策略
+  const bare = yaml ? yaml.load(T.genClash(false, [], P, LIB, T.DEFAULT_NODES,
+    { ...T.DEFAULT_SETTINGS, domain: '', directDomains: [], directIPs: [] })) : null
+  if (bare) {
+    const keys = Object.keys(bare.dns['nameserver-policy'])
+    ok(keys.length === 1 && keys[0] === '+.cn', '未设本站域名时只剩 +.cn')
+  }
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
