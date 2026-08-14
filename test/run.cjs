@@ -1555,7 +1555,8 @@ sec('39. DNS 可在管理端配置')
   // 三组都能改
   const d1 = load(mk({ remote: ['https://doh.opendns.com/dns-query'], domestic: ['https://doh.360.cn/dns-query'], bootstrap: ['114.114.114.114'] }))
   if (d1) {
-    ok(d1.dns.nameserver[0] === 'https://doh.opendns.com/dns-query', '境外组可改')
+    // 境外 DNS 默认带 #代理组 后缀（查询走代理），比对时把它去掉
+    ok(d1.dns.nameserver[0].split('#')[0] === 'https://doh.opendns.com/dns-query', '境外组可改')
     ok(d1.dns['direct-nameserver'][0] === 'https://doh.360.cn/dns-query', '国内组可改')
     ok(d1.dns['proxy-server-nameserver'][0] === 'https://doh.360.cn/dns-query', '节点解析跟随国内组')
     ok(d1.dns['default-nameserver'][0] === '114.114.114.114', '引导组可改')
@@ -1727,6 +1728,39 @@ sec('42. 强制代理域名')
   ok(/id="stpx"/.test(ui), '有对应输入框')
   ok(/proxyDomains: lines\('#stpx'\)/.test(ui), '保存时会提交')
   ok(/所有直连规则之前/.test(ui), '界面上说明了它的位置')
+}
+
+sec('43. 境外 DNS 查询必须走代理')
+{
+  // 实测：国内直连连不上 Cloudflare / Google 的 DoH（超时），而走代理是通的。
+  // mihomo 连不上就回落到国内明文 DNS —— 表现为 DNS 泄露检测里冒出运营商 DNS 出口。
+  const mk = dns => ({ ...T.DEFAULT_SETTINGS, domain: 'example.com', dns: { ...T.DEFAULT_DNS, ...dns } })
+  const load = st => yaml ? yaml.load(T.genClash(false, [], P, LIB, T.DEFAULT_NODES, st)) : null
+
+  const d = load(mk({}))
+  if (d) {
+    ok(d.dns.nameserver.every(s => s.includes('#🚀 节点选择')), '境外 DNS 默认带上代理组后缀')
+    ok(d.dns.nameserver.every(s => /^https:/.test(s)), '仍然是加密 DoH')
+    // # 在 YAML 里是注释符，不加引号会把后半截吃掉
+    ok(d.dns.nameserver[0].includes('dns-query#'), '# 没有被 YAML 当成注释截断')
+    ok(d['proxy-groups'].some(g => g.name === '🚀 节点选择'), '指向的组确实存在')
+    // 解析节点地址必须直连，否则和「DNS 走代理」互为死锁：代理起不来就查不了 DNS
+    ok(d.dns['proxy-server-nameserver'].every(s => !s.includes('#')), '节点地址解析不走代理，避免循环依赖')
+    ok(d.dns['default-nameserver'].every(s => !s.includes('#')), '引导 DNS 不走代理')
+    ok(d.dns['direct-nameserver'].every(s => !s.includes('#')), '直连域名的 DNS 不走代理')
+  }
+
+  const off = load(mk({ remoteViaProxy: false }))
+  if (off) ok(off.dns.nameserver.every(s => !s.includes('#')), '开关可关闭')
+
+  // 自定义境外 DNS 时后缀照样加上
+  const custom = load(mk({ remote: ['https://doh.opendns.com/dns-query'] }))
+  if (custom) ok(custom.dns.nameserver[0] === 'https://doh.opendns.com/dns-query#🚀 节点选择', '自定义地址也带后缀')
+
+  const ui = T.adminHTML(true, true)
+  ok(/境外 DNS 走代理/.test(ui), 'DNS 设置里有这个开关')
+  ok(/id="dviap"/.test(ui), '有对应控件')
+  ok(/remoteViaProxy: box\.querySelector\('#dviap'\)/.test(ui), '保存时会提交')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -28,6 +28,11 @@ const DEFAULT_DNS = {
   // 本站域名默认走境外组：它多半托管在 Cloudflare、服务器也常在境外，
   // 交给国内 DNS 可能拿到被污染的地址，再叠加「本站域名直连」就会直连到错误的 IP
   selfGroup: 'remote',
+  // 境外 DNS 的查询本身走代理。境内直连根本连不上 Cloudflare / Google 的 DoH
+  // （实测国内直连全部超时），mihomo 连不上就回落到国内明文 DNS —— 表现为
+  // DNS 泄露检测里冒出运营商的 DNS 出口。让查询走代理即可，不会循环依赖：
+  // 节点服务器地址由 proxy-server-nameserver 用国内 DNS 解析，代理先起得来。
+  remoteViaProxy: true,
   policies: [{ domain: '+.cn', group: 'domestic' }],
   extraFilter: []    // 追加的 fake-ip-filter，某些应用需要拿到真实 IP
 }
@@ -1890,6 +1895,7 @@ async function apiRoute(req, url, event) {
           d[g.k] = list
         }
         if (DNS_GROUPS.some(g => g.k === b.dns.selfGroup)) d.selfGroup = b.dns.selfGroup
+        if (typeof b.dns.remoteViaProxy === 'boolean') d.remoteViaProxy = b.dns.remoteViaProxy
         if (typeof b.dns.fakeIp === 'boolean') d.fakeIp = b.dns.fakeIp
         if (typeof b.dns.ipv6 === 'boolean') d.ipv6 = b.dns.ipv6
         if (Array.isArray(b.dns.policies)) {
@@ -2232,7 +2238,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
     `  direct-nameserver:`,
     ...dnsList(D.domestic),
     `  nameserver:`,
-    ...dnsList(D.remote),
+    ...dnsList(D.remoteViaProxy === false ? D.remote : D.remote.map(x => x + '#🚀 节点选择')),
     // 关掉会让代理域名的 DNS 查询在本地明文发出，等于白建隧道
     `  respect-rules: true`,
     `  nameserver-policy:`,
@@ -3217,6 +3223,8 @@ function dnsCardInner(){
   h += row('本站域名走', \`<b>\${esc(gl(d.selfGroup))}</b>\`)
   const pol = (d.policies || []).map(p => \`\${esc(p.domain)} → \${esc(gl(p.group))}\`).join('　·　')
   h += row('域名指派', pol || '（无）')
+  h += row('境外 DNS 走代理', d.remoteViaProxy === false
+    ? '<span style="color:var(--warn)">关闭 —— 境内直连多半连不上境外 DoH，会回落到国内 DNS</span>' : '开启')
   h += row('解析模式', (d.fakeIp === false ? 'redir-host（真实 IP）' : 'fake-ip')
     + '　·　IPv6 ' + (d.ipv6 === false ? '关' : '开')
     + ((d.extraFilter || []).length ? '　·　额外不走 fake-ip：' + esc(d.extraFilter.join('、')) : ''))
@@ -3962,6 +3970,11 @@ window.editDns = async () => {
       <div id="dpol">\${(d.policies || []).map(polRow).join('')}</div>
       <button class="g sm" type="button" onclick="addDnsPol()">\${icon('plus','s')}添加一条</button>
       <div class="hint">指定某类域名固定用哪组 DNS。写法同 mihomo：<code>+.cn</code> 含所有子域名。</div></div>
+    <div class="fg"><label class="lb">境外 DNS 走代理</label>
+      <div class="row"><button class="sw" id="dviap" data-on="\${d.remoteViaProxy === false ? 0 : 1}"><i></i></button>
+        <span class="hint" style="margin:0">强烈建议开启。境内直连连不上 Cloudflare / Google 的 DoH，
+          连不上就会回落到国内明文 DNS —— 表现是 DNS 泄露检测里冒出运营商的 DNS 出口。
+          不会循环依赖：节点地址由「国内 DNS」解析，代理先起得来。</span></div></div>
     <div class="fg"><label class="lb">解析模式</label>
       <div class="row"><button class="sw" id="dfake" data-on="\${d.fakeIp === false ? 0 : 1}"><i></i></button>
         <span class="hint" style="margin:0">开启 fake-ip（推荐）。关掉则用 redir-host 返回真实 IP，兼容性好但会慢一些。</span></div>
@@ -3975,6 +3988,7 @@ window.editDns = async () => {
   const lines = sel => [...box.querySelectorAll(sel)].map(e => e.value).join('\\n').split('\\n').map(s => s.trim()).filter(Boolean)
   const next = {
     selfGroup: selValue(box.querySelector('#dself')),
+    remoteViaProxy: box.querySelector('#dviap').dataset.on === '1',
     fakeIp: box.querySelector('#dfake').dataset.on === '1',
     ipv6: box.querySelector('#dv6').dataset.on === '1',
     extraFilter: lines('#dfilter'),
