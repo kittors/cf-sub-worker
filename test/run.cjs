@@ -1881,6 +1881,58 @@ sec('46. 全部表单：错误显示在字段下方，不清空重填')
   ok(/box\.querySelectorAll\('\.ferr'\)\.forEach/.test(ui), '每次提交先清掉上一轮的错误')
 }
 
+sec('47. 前端正则不能被模板字符串吃掉反斜杠')
+{
+  // adminHTML 整个是一个模板字符串，里面写 /[^\w-]/ 会被 JS 解析成 /[^w-]/ ——
+  // 反斜杠被当成未知转义丢掉，正则语义完全变了却照样能编译，静态检查看不出来。
+  // 实测踩过：标识清洗正则退化成 [^w-]，填 "probe1" 会被清空后报「没有可用字符」；
+  // 端口校验退化成 /^d+$/，443 直接判为非法。必须实际把正则跑一遍。
+  const ui = T.adminHTML(true, true)
+
+  const grab = (re, label) => {
+    const m = ui.match(re)
+    ok(!!m, '找得到' + label + '的正则')
+    return m ? new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1)) : null
+  }
+
+  const idRe = grab(/raw\.replace\((\/\[\^[^)]+\/g), ''\)/, '节点标识清洗')
+  if (idRe) {
+    ok('probe1'.replace(idRe, '') === 'probe1', '合法标识 probe1 原样保留')
+    ok('usV2'.replace(idRe, '') === 'usV2', '大小写混合保留')
+    ok('my-node'.replace(idRe, '') === 'my-node', '连字符保留')
+    ok('a_b'.replace(idRe, '') === 'a_b', '下划线保留')
+    ok('测试节点'.replace(idRe, '') === '', '中文被清空')
+    ok('a b!c'.replace(idRe, '') === 'abc', '空格与符号被剔除')
+  }
+
+  const portRe = grab(/if \(!(\/\^[^)]+?\/)\.test\(val\('op'\)\)/, '端口校验')
+  if (portRe) {
+    ok(portRe.test('443') && portRe.test('8443'), '数字端口通过')
+    ok(!portRe.test('abc') && !portRe.test('44a') && !portRe.test(''), '非数字被拒')
+  }
+
+  const ipRe = grab(/\.find\(x => !(\/\^\([^)]*\)[^)]*?\/)\.test\(x\)\)/, '直连 IP 校验')
+  if (ipRe) {
+    ok(ipRe.test('203.0.113.10') && ipRe.test('1.2.3.4'), '合法 IPv4 通过')
+    ok(!ipRe.test('abc') && !ipRe.test('1.2.3'), '非 IP 被拒')
+  }
+
+  // 兜底：扫描已知的「被吃掉」残骸形态
+  const wrecks = [[/\[\^w-\]/, '[^w-]'], [/\^d\+\$/, '^d+$'], [/\(\?:d\{/, '(?:d{']]
+  const hit = wrecks.filter(([re]) => re.test(ui)).map(([, n]) => n)
+  ok(hit.length === 0, '前端 JS 里没有反斜杠被吞的正则残骸' + (hit.length ? '：' + hit.join(', ') : ''))
+
+  // 所有前端正则都必须能编译
+  const bad = []
+  for (const m of ui.matchAll(/\/(?:\\.|\[[^\]]*\]|[^/\n\\])+\/[gimsuy]*/g)) {
+    const lit = m[0]
+    if (!/\\[wdsWDSbB]|\{\d/.test(lit)) continue
+    try { new RegExp(lit.slice(1, lit.lastIndexOf('/')), lit.slice(lit.lastIndexOf('/') + 1)) }
+    catch (e) { bad.push(lit.slice(0, 40)) }
+  }
+  ok(bad.length === 0, '前端正则均可编译' + (bad.length ? '：' + bad[0] : ''))
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
 

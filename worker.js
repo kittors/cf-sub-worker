@@ -4042,14 +4042,14 @@ window.editOwn = async (key) => {
     // 标识只留字母数字和连字符。以前是静默剥掉再报「不能为空」，
     // 填了中文的人会一头雾水 —— 现在直接说清楚剥完剩什么。
     const raw = key || val('ok')
-    const k = raw.replace(/[^\w-]/g, '')
+    const k = raw.replace(/[^\\w-]/g, '')
     if (!raw) return { msg:'请填写节点标识', field:'ok' }
     if (!k) return { msg:'标识只能用字母、数字和连字符，「' + raw + '」里没有可用字符', field:'ok' }
     if (k !== raw) return { msg:'标识只能用字母、数字和连字符，去掉不支持的字符后是「' + k + '」，确认就再点一次保存', field:'ok' }
     if (isNew && ow[k]) return { msg:'标识「' + k + '」已被「' + ow[k].name + '」占用', field:'ok' }
     if (!val('on')) return { msg:'请填写节点名称', field:'on' }
     if (!val('os')) return { msg:'请填写服务器地址', field:'os' }
-    if (!/^\d+$/.test(val('op')) || +val('op') < 1 || +val('op') > 65535) return { msg:'端口要是 1-65535 的数字', field:'op' }
+    if (!/^\\d+$/.test(val('op')) || +val('op') < 1 || +val('op') > 65535) return { msg:'端口要是 1-65535 的数字', field:'op' }
     if (!val('ou')) return { msg: t === 'vless' ? '请填写 UUID' : '请填写密码', field:'ou' }
 
     const np = { name: val('on'), type: t, s: val('os'), p: val('op'), u: val('ou'), sni: val('osni') }
