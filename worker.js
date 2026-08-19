@@ -3960,9 +3960,10 @@ window.editOwn = async (key) => {
     \${isNew ? \`<div class="fg"><label class="lb">从分享链接导入<span class="opt">可选</span></label>
       <div class="row"><input id="oimp" placeholder="vless://… 或 hysteria2://…">
         <button type="button" class="g" id="oimpb" style="white-space:nowrap">解析填充</button></div>
-      <div class="hint">粘贴节点的分享链接，自动填好下面各项，再补个标识就能存。</div></div>\` : ''}
-    <div class="fg"><label class="lb">节点标识\${isNew ? '' : '（不可改）'}</label>
-      <input id="ok" value="\${esc(key || '')}" placeholder="如 usV2，仅字母数字" \${isNew ? '' : 'disabled style="opacity:.55"'}>
+      <div class="hint">粘贴节点的分享链接，自动填好下面各项，核对无误就能直接保存。</div></div>\` : ''}
+    \${isNew ? '' : \`<div class="fg"><label class="lb">节点标识（自动生成，不可改）</label>
+      <input value="\${esc(key || '')}" disabled style="opacity:.5">
+      <div class="hint">分流策略在内部通过它指向这个节点，所以建好之后不能再变。</div></div>\`}
       <div class="hint">策略通过 <code>own:标识</code> 指向该节点，改了会让现有策略失效。</div></div>
     <div class="fg"><label class="lb">节点名称</label><input id="on" value="\${esc(n.name)}" placeholder="如 美西-AI-Vision"></div>
     <div class="fg"><label class="lb">协议</label>
@@ -4031,23 +4032,24 @@ window.editOwn = async (key) => {
           put('oports', n2.ports); put('oobfs', n2.obfs || 'salamander'); put('oopwd', n2.opwd)
         }
         sync()
-        say(n2.warn || '已填入，检查无误后补个标识即可保存', !n2.warn)
-        const kf = b.querySelector('#ok')
-        if (kf && !kf.value) kf.focus()
+        say(n2.warn || '已填好，核对一下就能保存', !n2.warn)
+        const nf = b.querySelector('#on')
+        if (nf) nf.focus()
       }, 30)
     })
   }, onSubmit: async b => {
     const val = id => b.querySelector('#' + id).value.trim()
     const t = selValue(b.querySelector('#ot'))
-    // 标识只留字母数字和连字符。以前是静默剥掉再报「不能为空」，
-    // 填了中文的人会一头雾水 —— 现在直接说清楚剥完剩什么。
-    const raw = key || val('ok')
-    const k = raw.replace(/[^\\w-]/g, '')
-    if (!raw) return { msg:'请填写节点标识', field:'ok' }
-    if (!k) return { msg:'标识只能用字母、数字和连字符，「' + raw + '」里没有可用字符', field:'ok' }
-    if (k !== raw) return { msg:'标识只能用字母、数字和连字符，去掉不支持的字符后是「' + k + '」，确认就再点一次保存', field:'ok' }
-    if (isNew && ow[k]) return { msg:'标识「' + k + '」已被「' + ow[k].name + '」占用', field:'ok' }
     if (!val('on')) return { msg:'请填写节点名称', field:'on' }
+    // 标识是内部引用（策略里的 own:xxx），用户在策略下拉里看到的一直是节点名，
+    // 从头到尾接触不到它 —— 以前却要人手填，还得遵守「只能字母数字连字符」。
+    // 新建时按名称生成，重了就加序号。已有节点的标识保持不变，否则策略会失效。
+    let k = key
+    if (!k) {
+      const base = 'n' + Math.abs([...val('on')].reduce((x, c) => x * 31 + c.charCodeAt(0) | 0, 7)).toString(36)
+      k = base
+      for (let n2 = 2; ow[k]; n2++) k = base + '-' + n2
+    }
     if (!val('os')) return { msg:'请填写服务器地址', field:'os' }
     if (!/^\\d+$/.test(val('op')) || +val('op') < 1 || +val('op') > 65535) return { msg:'端口要是 1-65535 的数字', field:'op' }
     if (!val('ou')) return { msg: t === 'vless' ? '请填写 UUID' : '请填写密码', field:'ou' }

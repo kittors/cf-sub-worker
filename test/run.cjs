@@ -1777,12 +1777,11 @@ sec('44. 自有节点：表单校验不再清空重填')
   ok(/input\.bad,textarea\.bad\{border-color/.test(ui), '出错字段有视觉标记')
 
   // 逐项校验都带 field，能定位到具体输入框
-  ok(/field:'ok'/.test(ui) && /field:'on'/.test(ui) && /field:'os'/.test(ui) &&
-     /field:'op'/.test(ui) && /field:'ou'/.test(ui), '标识/名称/服务器/端口/密钥都能定位')
+  ok(/field:'on'/.test(ui) && /field:'os'/.test(ui) &&
+     /field:'op'/.test(ui) && /field:'ou'/.test(ui), '名称/服务器/端口/密钥都能定位')
   ok(/field:'opk'/.test(ui) && /field:'osid'/.test(ui), 'Reality 公钥与 ShortId 也能定位')
-  ok(/里没有可用字符/.test(ui), '标识全是非法字符时说清楚原因，而不是报「不能为空」')
-  ok(/去掉不支持的字符后是/.test(ui), '标识含部分非法字符时给出清洗后的结果让人确认')
-  ok(/已被「/.test(ui), '标识重复时指出被谁占用')
+  // 标识改成自动生成后，这几条手填相关的校验连同输入框一起没了
+  ok(!/field:'ok'/.test(ui), '不再有标识字段的校验')
   ok(/端口要是 1-65535 的数字/.test(ui), '端口有范围校验')
   ok(/return r\.msg \|\| '保存失败'/.test(ui), '服务端报错也留在弹窗里，不关闭')
 }
@@ -1895,15 +1894,6 @@ sec('47. 前端正则不能被模板字符串吃掉反斜杠')
     return m ? new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1)) : null
   }
 
-  const idRe = grab(/raw\.replace\((\/\[\^[^)]+\/g), ''\)/, '节点标识清洗')
-  if (idRe) {
-    ok('probe1'.replace(idRe, '') === 'probe1', '合法标识 probe1 原样保留')
-    ok('usV2'.replace(idRe, '') === 'usV2', '大小写混合保留')
-    ok('my-node'.replace(idRe, '') === 'my-node', '连字符保留')
-    ok('a_b'.replace(idRe, '') === 'a_b', '下划线保留')
-    ok('测试节点'.replace(idRe, '') === '', '中文被清空')
-    ok('a b!c'.replace(idRe, '') === 'abc', '空格与符号被剔除')
-  }
 
   const portRe = grab(/if \(!(\/\^[^)]+?\/)\.test\(val\('op'\)\)/, '端口校验')
   if (portRe) {
@@ -1931,6 +1921,41 @@ sec('47. 前端正则不能被模板字符串吃掉反斜杠')
     catch (e) { bad.push(lit.slice(0, 40)) }
   }
   ok(bad.length === 0, '前端正则均可编译' + (bad.length ? '：' + bad[0] : ''))
+}
+
+sec('48. 节点标识自动生成，不再暴露给用户')
+{
+  // 标识是内部引用（策略里的 own:xxx）。用户在策略下拉里看到的一直是节点名，
+  // 从头到尾接触不到它，却曾经要人手填、还得遵守「只能字母数字连字符」。
+  const ui = T.adminHTML(true, true)
+  ok(!/id="ok"/.test(ui), '新建表单里没有标识输入框')
+  ok(/自动生成，不可改/.test(ui), '编辑时以只读形式展示，便于排查')
+  ok(/let k = key\s*\n\s*if \(!k\) \{/.test(ui), '新建才生成，已有节点沿用原标识')
+  ok(/for \(let n2 = 2; ow\[k\]; n2\+\+\)/.test(ui), '重名时加序号，不覆盖已有节点')
+  ok(!/补个标识/.test(ui), '文案里不再提「补个标识」')
+
+  // 把生成逻辑抠出来实际跑一遍，确认产出合法且稳定
+  const gen = (name, ow) => {
+    const base = 'n' + Math.abs([...name].reduce((x, c) => x * 31 + c.charCodeAt(0) | 0, 7)).toString(36)
+    let k = base
+    for (let n2 = 2; ow[k]; n2++) k = base + '-' + n2
+    return k
+  }
+  const k1 = gen('美西-AI-Vision', {})
+  ok(/^[\w-]+$/.test(k1), `生成的标识只含合法字符（${k1}）`)
+  ok(gen('美西-AI-Vision', {}) === k1, '同名生成同一个标识，稳定')
+  ok(gen('香港中转', {}) !== k1, '不同名生成不同标识')
+  const k2 = gen('美西-AI-Vision', { [k1]: {} })
+  ok(k2 === k1 + '-2', `重名自动加序号（${k2}）`)
+  const k3 = gen('美西-AI-Vision', { [k1]: {}, [k1 + '-2']: {} })
+  ok(k3 === k1 + '-3', '连续重名继续递增')
+  // 中文名也要能生成合法标识 —— 这正是以前手填时最容易翻车的输入
+  ok(/^[\w-]+$/.test(gen('测试节点', {})), '纯中文名也生成合法标识')
+  ok(/^[\w-]+$/.test(gen('🇺🇸 美国 01', {})), '带 emoji 的名字同样')
+
+  // 策略指向的是 own:标识，标识变了策略就断了 —— 所以编辑时绝不能重新生成
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(/已有节点的标识保持不变，否则策略会失效/.test(src), '代码里写明了为什么编辑时不能改')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
