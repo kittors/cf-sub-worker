@@ -73,8 +73,10 @@ if (cd) {
   ok(cd.dns['respect-rules'] === true, 'DNS respect-rules 已开启')
   const ownA = (cd.proxies || []).find(p => p.name === OWN.usV2.name)
   const ownB = (cd.proxies || []).find(p => p.name === OWN.usH.name)
-  ok(ownA && ownA.server === SET.directIPs[0], '自有 VLESS 拨号走 directIP，不解析节点域名')
-  ok(ownB && ownB.server === SET.directIPs[0], '自有 Hy2 拨号走 directIP，不解析节点域名')
+  // 节点地址必须原样下发。曾经这里断言的是「走 directIPs[0]」，那个行为在加了
+  // 第二台服务器后会让新节点连到第一台去，已经改掉。
+  ok(ownA && ownA.server === OWN.usV2.s, '自有 VLESS 的服务器地址原样下发')
+  ok(ownB && ownB.server === OWN.usH.s, '自有 Hy2 的服务器地址原样下发')
 
   // 规则优先级
   const idx = d => cd.rules.findIndex(r => r.startsWith(`DOMAIN-SUFFIX,${d},`))
@@ -1956,6 +1958,42 @@ sec('48. 节点标识自动生成，不再暴露给用户')
   // 策略指向的是 own:标识，标识变了策略就断了 —— 所以编辑时绝不能重新生成
   const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
   ok(/已有节点的标识保持不变，否则策略会失效/.test(src), '代码里写明了为什么编辑时不能改')
+}
+
+sec('49. 自有节点的服务器地址不得被改写')
+{
+  // 曾经有过一版 ownHost()：节点地址只要不是 IP，就用 settings.directIPs[0] 顶掉，
+  // 前提是「自有节点都在同一台机」。一旦加了第二台，新节点就拿着自己的密钥去连
+  // 第一台的 IP，表现为握手失败、一直 timeout —— 而配置页上地址显示得好好的。
+  const own = {
+    a: { name: '美西', type: 'vless', s: 'cloud.example.com', p: 443, u: '11111111-2222-3333-4444-555555555555', sni: 'www.bing.com', pk: 'PK', sid: '01', net: 'tcp', flow: 'xtls-rprx-vision' },
+    b: { name: '香港', type: 'hysteria2', s: 'hk2.example.com', p: 8443, u: 'pwd', sni: 'hk2.example.com', obfs: 'salamander', opwd: 'o' },
+    c: { name: '直填IP', type: 'hysteria2', s: '203.0.113.9', p: 8443, u: 'pwd', sni: 's', obfs: 'salamander', opwd: 'o' },
+  }
+  const st = { ...T.DEFAULT_SETTINGS, domain: 'sub.example.com', directIPs: ['104.194.69.137'], directDomains: [] }
+  const cy = T.genClash(false, [], P, LIB, own, st)
+  const d = yaml ? yaml.load(cy) : null
+  if (d) {
+    const byName = {}
+    d.proxies.forEach(p => { byName[p.name] = p })
+    ok(byName['美西'].server === 'cloud.example.com', '第一台的地址原样下发')
+    ok(byName['香港'].server === 'hk2.example.com', '第二台指向自己的域名，不被第一个直连 IP 顶掉')
+    ok(byName['直填IP'].server === '203.0.113.9', '直接填 IP 的照常')
+    ok(!d.proxies.some(p => p.server === '104.194.69.137'), '没有任何节点被替换成 directIPs[0]')
+
+    // 对症的做法：把节点域名排除出 fake-ip，而不是拿一个 IP 覆盖所有节点
+    const f = d.dns['fake-ip-filter'] || []
+    ok(f.includes('cloud.example.com') && f.includes('hk2.example.com'), '节点域名都进了 fake-ip-filter')
+    ok(!f.includes('203.0.113.9'), '纯 IP 不必加进过滤表')
+  }
+  // sing-box 一直是直接用 n.s，一并守住
+  const sb = JSON.parse(T.genSB([], P, LIB, own, st))
+  const hk = sb.outbounds.find(o => o.tag === '香港')
+  ok(hk && hk.server === 'hk2.example.com', 'sing-box 侧同样不改写')
+
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(!/function ownHost/.test(src), 'ownHost 已移除')
+  ok(!/directIPs\)\s*\|\|\s*\[\]\)\[0\]/.test(src), '不再有「取第一个直连 IP 当节点地址」的逻辑')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

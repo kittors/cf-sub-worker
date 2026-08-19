@@ -2078,15 +2078,6 @@ function looksIP(s) {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(s) || s.includes(':')
 }
 
-// 自有节点若填域名，拨号改走 settings.directIPs[0]。
-// Clash TUN 解析节点域名会脏（假 IP / 过期 A 记录），两个节点共用一个域名就会一起 timeout。
-// ponytail: 自有节点都在同一台机；多机再给节点加独立 ip 字段。
-function ownHost(n, st) {
-  if (looksIP(n.s)) return n.s
-  const ip = ((st && st.directIPs) || [])[0]
-  return ip || n.s
-}
-
 // DoH 地址里有冒号和斜杠，写进 YAML 流式列表要带引号；纯 IP 不用
 function dnsQ(x) {
   const v = String(x).trim()
@@ -2115,7 +2106,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
       pl += [
         `  - name: "${n.name}"`,
         `    type: vless`,
-        `    server: ${ownHost(n, SET)}`,
+        `    server: ${n.s}`,
         `    port: ${n.p}`,
         `    uuid: ${n.u}`,
         `    tls: true`,
@@ -2134,7 +2125,7 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
       pl += [
         `  - name: "${n.name}"`,
         `    type: hysteria2`,
-        `    server: ${ownHost(n, SET)}`,
+        `    server: ${n.s}`,
         `    port: ${n.p}`,
         ...(n.ports ? [`    ports: ${n.ports}`] : []),
         `    password: ${n.u}`,
@@ -2267,6 +2258,9 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
       `    - "ntp.*.com"`,
       `    - "+.pool.ntp.org"`,
       ...(SET.domain ? [`    - "+.${SET.domain}"`] : []),
+      // 自有节点的服务器域名必须走真实解析。拿到 fake IP 就永远拨不通，
+      // 而且几个节点会一起 timeout —— 看着像服务器挂了，其实是解析问题。
+      ...[...new Set(Object.values(own).map(n => n.s).filter(x => x && !looksIP(x)))].map(h => `    - "${h}"`),
       ...(D.extraFilter || []).map(f => `    - "${f}"`)
     ]),
     `  default-nameserver:`,
@@ -2426,11 +2420,11 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     ...Object.values(own).map(n => {
       if (n.type === 'vless') {
         if (n.net === 'tcp') {
-          return { type: 'vless', tag: n.name, server: ownHost(n, SET), server_port: n.p, uuid: n.u, flow: n.flow, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'tcp' } }
+          return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, flow: n.flow, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'tcp' } }
         }
-        return { type: 'vless', tag: n.name, server: ownHost(n, SET), server_port: n.p, uuid: n.u, flow: '', packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'xhttp', path: '/', mode: 'auto' } }
+        return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, flow: '', packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'xhttp', path: '/', mode: 'auto' } }
       }
-      return { type: 'hysteria2', tag: n.name, server: ownHost(n, SET), server_port: n.p, password: n.u, obfs: { type: n.obfs, password: n.opwd }, tls: { enabled: true, server_name: n.sni, insecure: true } }
+      return { type: 'hysteria2', tag: n.name, server: n.s, server_port: n.p, password: n.u, obfs: { type: n.obfs, password: n.opwd }, tls: { enabled: true, server_name: n.sni, insecure: true } }
     }),
     ...upOut,
     ...chOut
@@ -2595,7 +2589,7 @@ function shareLink(n) {
 
 function genShare(up, ownCfg, st) {
   const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
-  const own = Object.values(ownCfg || {}).map(o => ({ name: o.name, own: true, o: { ...o, s: ownHost(o, SET) } }))
+  const own = Object.values(ownCfg || {}).map(o => ({ name: o.name, own: true, o: { ...o, s: o.s } }))
   const links = [...own, ...up].map(shareLink).filter(Boolean)
   return b64utf8(links.join('\n'))
 }
