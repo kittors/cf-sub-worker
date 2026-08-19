@@ -729,7 +729,7 @@ sec('21. 订阅源增删的交互契约')
   ok(ui.includes('先试拉一次'), '添加前会试拉并告知用户')
   // 整页 dash() 会换骨架屏 + 重放入场动画，视觉上就是「闪一下」
   ok(ui.includes('async function syncUp'), '存在局部刷新函数')
-  ok(/syncUp\(r\.up\)/.test(ui), '添加后走局部刷新而非整页重建')
+  ok(/syncUp\((r|box)\.(up|__up)\)/.test(ui), '添加后走局部刷新而非整页重建')
   ok(!/toast\('已添加订阅源'\); ST = null; dash\(\)/.test(ui), '添加后不再整页 dash()')
   ok(ui.includes('function nodeCardInner'), '节点卡片可单独重绘')
   ok(ui.includes("id=\"nodecard\""), '节点卡片有独立锚点')
@@ -1726,7 +1726,7 @@ sec('42. 强制代理域名')
   const ui = T.adminHTML(true, true)
   ok(/强制走代理的域名/.test(ui), '设置弹窗里有这一项')
   ok(/id="stpx"/.test(ui), '有对应输入框')
-  ok(/proxyDomains: lines\('#stpx'\)/.test(ui), '保存时会提交')
+  ok(/proxyDomains: lines2?\('#stpx'\)/.test(ui), '保存时会提交')
   ok(/所有直连规则之前/.test(ui), '界面上说明了它的位置')
 }
 
@@ -1760,7 +1760,7 @@ sec('43. 境外 DNS 查询必须走代理')
   const ui = T.adminHTML(true, true)
   ok(/境外 DNS 走代理/.test(ui), 'DNS 设置里有这个开关')
   ok(/id="dviap"/.test(ui), '有对应控件')
-  ok(/remoteViaProxy: box\.querySelector\('#dviap'\)/.test(ui), '保存时会提交')
+  ok(/remoteViaProxy: b\.querySelector\('#dviap'\)/.test(ui), '保存时会提交')
 }
 
 sec('44. 自有节点：表单校验不再清空重填')
@@ -1823,6 +1823,62 @@ sec('45. 自有节点：分享链接快捷添加')
   ok(/opt\.click\(\)/.test(ui), '协议下拉是自定义组件，靠点击触发重绘')
   ok(!/从分享链接导入[\s\S]{0,200}isNew \? '' :/.test(ui) && /isNew \?[\s\S]{0,80}从分享链接导入/.test(ui),
      '只在新建时显示导入框（编辑已有节点时标识不可改）')
+}
+
+sec('46. 全部表单：错误显示在字段下方，不清空重填')
+{
+  const ui = T.adminHTML(true, true)
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+
+  // 每个带输入的表单都要走 onSubmit，否则就还是「关窗口 + 角落 toast」的老路
+  const forms = ['editOwn', 'editPol', 'editLib', 'editSettings', 'editDns', 'editChain', 'changePwd', 'addUp', 'editUp']
+  const missing = []
+  for (const f of forms) {
+    const i = ui.indexOf('window.' + f + ' = async')
+    if (i < 0) { missing.push(f + '(找不到)'); continue }
+    const nxt = ui.indexOf('\nwindow.', i + 10)
+    const body = ui.slice(i, nxt < 0 ? undefined : nxt)
+    if (!/onSubmit/.test(body)) missing.push(f)
+  }
+  ok(missing.length === 0, '所有表单都用 onSubmit 校验' + (missing.length ? '：' + missing.join(', ') : `（共 ${forms.length} 个）`))
+
+  // 提交期的校验一律不能再用 toast —— 那意味着弹窗已经关了
+  const stillToast = []
+  for (const f of forms) {
+    const i = ui.indexOf('window.' + f + ' = async')
+    const nxt = ui.indexOf('\nwindow.', i + 10)
+    const body = ui.slice(i, nxt < 0 ? undefined : nxt)
+    const after = body.indexOf('onSubmit')
+    // onSubmit 之前的 toast 是打开弹窗前的前置检查（数据没加载/没有可选项），那是合理的
+    if (/return toast\(/.test(body.slice(after))) stillToast.push(f)
+  }
+  ok(stillToast.length === 0, '提交校验不再用 toast' + (stillToast.length ? '：' + stillToast.join(', ') : ''))
+
+  // 每个表单至少有一处把错误定位到具体字段
+  const noField = forms.filter(f => {
+    const i = ui.indexOf('window.' + f + ' = async')
+    const nxt = ui.indexOf('\nwindow.', i + 10)
+    return !/field:/.test(ui.slice(i, nxt < 0 ? undefined : nxt))
+  })
+  ok(noField.length === 0, '每个表单都能定位到出错字段' + (noField.length ? '：' + noField.join(', ') : ''))
+
+  // 订阅源拉不通时不再叠第二个弹窗 —— 那个表单本来就有粘贴框
+  ok(!/const pasteBox/.test(ui), '移除了二级粘贴弹窗')
+  ok(/b\.__retry = 1/.test(ui), '首次拉不通留在原弹窗提示，再点一次才强制添加')
+  ok(/粘到下面的框里再保存/.test(ui), '就地告诉用户下一步怎么做')
+
+  // 策略：什么都不匹配的策略只会生成一个用不上的空分组
+  ok(/至少要有一条匹配规则/.test(ui), '策略要求至少一条匹配规则')
+  ok(/已有同名策略/.test(ui), '策略重名会被拦下')
+  // 域名集：空的不会产生任何规则
+  ok(/空域名集不会产生任何规则/.test(ui), '域名集要求至少一个域名')
+  // 站点设置：IP 格式当场校验，不必等服务端
+  ok(/不是合法的 IPv4 地址/.test(ui), '直连 IP 前端就校验格式')
+  // DNS：三组各自的约束
+  ok(/引导 DNS 必须是纯 IP，「/.test(ui), '引导 DNS 校验并指出是哪一条不合格')
+  ok(/不是有效地址 —— 要 https:\/\/ 开头的 DoH/.test(ui), '其它组校验地址格式')
+
+  ok(/box\.querySelectorAll\('\.ferr'\)\.forEach/.test(ui), '每次提交先清掉上一轮的错误')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -3869,22 +3869,29 @@ window.editPol = async (i) => {
     bindSelect(b)
     b.querySelector('#ps').onclick = function(){ this.dataset.on = this.dataset.on === '1' ? '0' : '1' }
     b.querySelectorAll('#pc .chip').forEach(c => c.onclick = () => c.classList.toggle('on'))
+  }, onSubmit: async b => {
+    const name = b.querySelector('#pn').value.trim()
+    if (!name) return { msg:'请填写策略名称 —— 它会成为客户端里的分组名', field:'pn' }
+    if ((POL.policies || []).some((x, k) => k !== i && x.name === name))
+      return { msg:'已有同名策略 —— 分组名重复会让客户端只认其中一个', field:'pn' }
+    const np = {
+      id: p.id || 'p' + Math.abs([...name].reduce((a, c) => a * 31 + c.charCodeAt(0) | 0, 7)).toString(36),
+      name, target: selValue(b.querySelector('#pt')),
+      strict: b.querySelector('#ps').dataset.on === '1',
+      enabled: p.enabled !== false,
+      presets: [...b.querySelectorAll('#pc .chip.on')].map(c => c.dataset.k),
+      domains: b.querySelector('#pd').value.split('\\n').map(x => x.trim()).filter(Boolean),
+      keywords: b.querySelector('#pk').value.split(',').map(x => x.trim()).filter(Boolean),
+      processes: b.querySelector('#pp').value.split(',').map(x => x.trim()).filter(Boolean)
+    }
+    // 一条什么都不匹配的策略只会生成一个永远用不上的空分组
+    if (!np.presets.length && !np.domains.length && !np.keywords.length && !np.processes.length)
+      return { msg:'至少要有一条匹配规则：勾选域名集，或填额外域名 / 关键词 / 进程名', field:'pd' }
+    b.__np = np
+    return null
   }})
   if (!box) return
-
-  const name = box.querySelector('#pn').value.trim()
-  if (!name) return toast('策略名称不能为空', true)
-  const np = {
-    id: p.id || 'p' + Math.abs([...name].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)).toString(36),
-    name, target: selValue(box.querySelector('#pt')),
-    strict: box.querySelector('#ps').dataset.on === '1',
-    enabled: p.enabled !== false,
-    presets: [...box.querySelectorAll('#pc .chip.on')].map(c => c.dataset.k),
-    domains: box.querySelector('#pd').value.split('\\n').map(s=>s.trim()).filter(Boolean),
-    keywords: box.querySelector('#pk').value.split(',').map(s=>s.trim()).filter(Boolean),
-    processes: box.querySelector('#pp').value.split(',').map(s=>s.trim()).filter(Boolean)
-  }
-  if (isNew) POL.policies.push(np); else POL.policies[i] = np
+  if (isNew) POL.policies.push(box.__np); else POL.policies[i] = box.__np
   await savePol(isNew ? '已新建' : '已保存')
 }
 
@@ -3896,15 +3903,19 @@ window.editLib = async (key) => {
     <div class="fg"><label class="lb">说明</label><input id="lh" value="\${esc(v.hint||'')}" placeholder="可留空"></div>
     <div class="fg"><label class="lb">域名（每行一个，保存时自动去重转小写）</label>
       <textarea id="ld" style="min-height:180px">\${esc((v.domains||[]).join('\\n'))}</textarea></div>\`
-  const box = await modal({ title: isNew ? '新建域名集' : '编辑域名集', html, ok:'保存', wide:true })
-  if (!box) return
-  const name = box.querySelector('#ln').value.trim()
-  if (!name) return toast('名称不能为空', true)
-  const k = key || 'c' + Math.abs([...name].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)).toString(36)
-  const r = await api('/api/lib', { key:k, name, hint: box.querySelector('#lh').value.trim(),
-    domains: box.querySelector('#ld').value.split('\\n').map(s=>s.trim()).filter(Boolean) })
-  if (!r.ok) return toast(r.msg || '保存失败', true)
-  POL.lib = r.lib; toast('已保存'); dash(true)
+  const box = await modal({ title: isNew ? '新建域名集' : '编辑域名集', html, ok:'保存', wide:true, onSubmit: async b => {
+    const name = b.querySelector('#ln').value.trim()
+    if (!name) return { msg:'请填写域名集名称', field:'ln' }
+    const doms = b.querySelector('#ld').value.split('\\n').map(x => x.trim()).filter(Boolean)
+    if (!doms.length) return { msg:'至少填一个域名 —— 空域名集不会产生任何规则', field:'ld' }
+    const k2 = key || 'c' + Math.abs([...name].reduce((a, c) => a * 31 + c.charCodeAt(0) | 0, 7)).toString(36)
+    const r = await api('/api/lib', { key: k2, name, hint: b.querySelector('#lh').value.trim(), domains: doms })
+    if (!r.ok) return { msg: r.msg || '保存失败', field: /名称/.test(r.msg || '') ? 'ln' : 'ld' }
+    b.__lib = r.lib
+    return null
+  }})
+      if (!box) return
+      POL.lib = box.__lib; toast('已保存'); dash(true)
 }
 
 window.editSettings = async () => {
@@ -3924,15 +3935,19 @@ window.editSettings = async () => {
       <textarea id="stpx" placeholder="relay.example.com" style="min-height:70px">\${esc((st.proxyDomains||[]).join('\\n'))}</textarea>
       <div class="hint">规则生成在<b>所有直连规则之前</b>，是唯一能从「整个域名直连」里把个别子域名拎出来的位置。
         用途：某个子域名在直连时被劫持（证书报错、跳到不相干的网站），而同域名下别的服务又必须直连。</div></div>\`
-  const box = await modal({ title:'站点设置', html, ok:'保存', wide:true })
+  const box = await modal({ title:'站点设置', html, ok:'保存', wide:true, onSubmit: async b => {
+    const lines2 = sel => b.querySelector(sel).value.split('\\n').map(x => x.trim()).filter(Boolean)
+    const bad = lines2('#stip').find(x => !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(x))
+    if (bad) return { msg:'「' + bad + '」不是合法的 IPv4 地址', field:'stip' }
+    const r = await api('/api/settings', {
+      domain: b.querySelector('#std').value.trim(),
+      directDomains: lines2('#stdd'), directIPs: lines2('#stip'), proxyDomains: lines2('#stpx')
+    })
+    if (!r.ok) return { msg: r.msg || '保存失败', field: /IP/.test(r.msg || '') ? 'stip' : 'std' }
+    SET = { ok:true, settings: r.settings, dnsGroups: (SET && SET.dnsGroups) || [] }
+    return null
+  }})
   if (!box) return
-  const lines = el => box.querySelector(el).value.split('\\n').map(x => x.trim()).filter(Boolean)
-  const r = await api('/api/settings', {
-    domain: box.querySelector('#stdm').value.trim(),
-    directDomains: lines('#stdd'), directIPs: lines('#stip'), proxyDomains: lines('#stpx')
-  })
-  if (!r.ok) return toast(r.msg || '保存失败', true)
-  SET = { ok:true, settings: r.settings }
   toast('已保存'); dash(true)
 }
 
@@ -4113,24 +4128,41 @@ window.editDns = async () => {
     <div class="fg"><label class="lb">额外不走 fake-ip 的域名（每行一个）</label>
       \${ta('dfilter', d.extraFilter, 'example.com')}
       <div class="hint">某些应用要拿到真实 IP 才能工作（如部分游戏、内网服务）。本站域名已自动在列。</div></div>\`
-  const box = await modal({ title:'DNS 设置', html, ok:'保存', wide:true, onMount: b => { bindSelect(b); window.__dnsBox = b } })
+  const box = await modal({ title:'DNS 设置', html, ok:'保存', wide:true,
+    onMount: b => { bindSelect(b); window.__dnsBox = b },
+    onSubmit: async b => {
+      const lines2 = sel => [...b.querySelectorAll(sel)].map(e => e.value).join('\\n')
+        .split('\\n').map(x => x.trim()).filter(Boolean)
+      const next = {
+        selfGroup: selValue(b.querySelector('#dself')),
+        remoteViaProxy: b.querySelector('#dviap').dataset.on === '1',
+        fakeIp: b.querySelector('#dfake').dataset.on === '1',
+        ipv6: b.querySelector('#dv6').dataset.on === '1',
+        extraFilter: lines2('#dfilter'),
+        policies: [...b.querySelectorAll('#dpol [data-pi]')].map(r2 => ({
+          domain: r2.querySelector('.pdm').value.trim(),
+          group: selValue(r2.querySelector('.sel'))
+        })).filter(x => x.domain)
+      }
+      for (const g of groups) {
+        const list = lines2('#dg_' + g.k)
+        if (!list.length) return { msg: g.label + '不能为空 —— 至少留一个地址', field:'dg_' + g.k }
+        // 引导 DNS 负责解析其它 DoH 的域名，自己再依赖域名解析就成了死循环
+        if (g.k === 'bootstrap') {
+          const bad = list.find(x => !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(x))
+          if (bad) return { msg:'引导 DNS 必须是纯 IP，「' + bad + '」不行', field:'dg_bootstrap' }
+        } else {
+          const bad = list.find(x => !/^(https|tls|quic):\\/\\//.test(x) && !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(x))
+          if (bad) return { msg:'「' + bad + '」不是有效地址 —— 要 https:// 开头的 DoH，或纯 IP', field:'dg_' + g.k }
+        }
+        next[g.k] = list
+      }
+      const r = await api('/api/settings', { ...st, dns: next })
+      if (!r.ok) return r.msg || '保存失败'
+      SET = { ok:true, settings: r.settings, dnsGroups: groups }
+      return null
+    } })
   if (!box) return
-  const lines = sel => [...box.querySelectorAll(sel)].map(e => e.value).join('\\n').split('\\n').map(s => s.trim()).filter(Boolean)
-  const next = {
-    selfGroup: selValue(box.querySelector('#dself')),
-    remoteViaProxy: box.querySelector('#dviap').dataset.on === '1',
-    fakeIp: box.querySelector('#dfake').dataset.on === '1',
-    ipv6: box.querySelector('#dv6').dataset.on === '1',
-    extraFilter: lines('#dfilter'),
-    policies: [...box.querySelectorAll('#dpol [data-pi]')].map(r => ({
-      domain: r.querySelector('.pdm').value.trim(),
-      group: selValue(r.querySelector('.sel'))
-    })).filter(x => x.domain)
-  }
-  for (const g of groups) next[g.k] = lines('#dg_' + g.k)
-  const r = await api('/api/settings', { ...st, dns: next })
-  if (!r.ok) return toast(r.msg || '保存失败', true)
-  SET = { ok:true, settings: r.settings, dnsGroups: groups }
   toast('DNS 设置已保存'); dash(true)
 }
 window.addDnsPol = () => {
@@ -4191,14 +4223,15 @@ window.editChain = async (id) => {
     }
     b.querySelectorAll('#co .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
     sync()
+  }, onSubmit: async b => {
+    const name = b.querySelector('#cn').value.trim()
+    if (!name) return { msg:'给这条链起个名字 —— 它会直接成为客户端里的节点名', field:'cn' }
+    const r = await api('/api/chains', { act:'save', id, name,
+      via: selValue(b.querySelector('#cv')), out: selValue(b.querySelector('#co')) })
+    if (!r.ok) return { msg: r.msg || '保存失败', field: /同名|名字/.test(r.msg || '') ? 'cn' : null }
+    return null
   }})
   if (!box) return
-  const name = box.querySelector('#cn').value.trim()
-  const via = selValue(box.querySelector('#cv'))
-  const out = selValue(box.querySelector('#co'))
-  if (!name) return toast('给这条链起个名字', true)
-  const r = await api('/api/chains', { act:'save', id, name, via, out })
-  if (!r.ok) return toast(r.msg || '保存失败', true)
   await reloadChains(id ? '已保存' : '已新建')
 }
 
@@ -4211,27 +4244,19 @@ window.changePwd = async () => {
     <div class="fg"><label class="lb">再输一次</label>
       <input id="p2" type="password" autocomplete="new-password" placeholder="确认新密码">
       <div class="hint">保存后其它设备上的登录会失效，当前这台不用重新登录。</div></div>\`
-  const box = await modal({ title:'修改密码', html, ok:'保存', wide:true })
+  const box = await modal({ title:'修改密码', html, ok:'保存', wide:true, onSubmit: async b => {
+    const oldPassword = b.querySelector('#p0').value
+    const newPassword = b.querySelector('#p1').value
+    if (!oldPassword) return { msg:'请输入当前密码', field:'p0' }
+    if (newPassword.length < 8) return { msg:'新密码至少 8 位', field:'p1' }
+    // 输错了自己看不见，只能等下次登录才发现 —— 所以要求输两遍
+    if (newPassword !== b.querySelector('#p2').value) return { msg:'两次输入的新密码不一致', field:'p2' }
+    const r = await api('/api/password', { oldPassword, newPassword })
+    if (!r.ok) return { msg: r.msg || '修改失败', field: /当前密码/.test(r.msg || '') ? 'p0' : 'p1' }
+    return null
+  }})
   if (!box) return
-  const oldPassword = box.querySelector('#p0').value
-  const newPassword = box.querySelector('#p1').value
-  // 输错了自己却看不见，只能在下次登录时才发现 —— 所以要求输两遍
-  if (newPassword !== box.querySelector('#p2').value) return toast('两次输入的新密码不一致', true)
-  if (!oldPassword) return toast('请输入当前密码', true)
-  if (newPassword.length < 8) return toast('新密码至少 8 位', true)
-  const r = await api('/api/password', { oldPassword, newPassword })
-  if (!r.ok) return toast(r.msg || '修改失败', true)
   toast('密码已更新')
-}
-// 拉不通时的退路对话框。粘了内容就用内容，留空直接保存就是先把源加进来。
-// 两件事塞进一个弹窗，是因为用户此刻只关心一件事：怎么才能把它用上。
-const pasteBox = async (title, msg) => {
-  const html = \`<div class="fg"><label class="lb">粘贴订阅内容</label>
-    <textarea id="pt" placeholder="在浏览器里打开订阅链接 → 全选复制 → 粘到这里"></textarea>
-    <div class="hint">浏览器是从你自己的网络访问机场的，不经过本站出口，机场拦不住。
-      留空直接保存则先把这个源加进来，暂时不会有节点。</div></div>\`
-  const b = await modal({ title, desc: msg + '。', html, ok:'保存', danger:true, wide:true })
-  return b ? b.querySelector('#pt').value.trim() : null
 }
 
 window.addUp = async () => {
@@ -4244,22 +4269,26 @@ window.addUp = async () => {
     <div class="fg"><label class="lb">或粘贴订阅内容</label>
       <textarea id="ut" placeholder="机场拦住本站时用这个：浏览器打开订阅链接 → 全选复制 → 粘到这里"></textarea>
       <div class="hint">填了这里就不走网络，直接解析贴进来的内容并存成快照。</div></div>\`
-  const box = await modal({ title:'添加订阅源', html, ok:'添加', wide:true })
+  const box = await modal({ title:'添加订阅源', html, ok:'添加', wide:true, onSubmit: async b => {
+    const name = b.querySelector('#un').value.trim()
+    const url = b.querySelector('#uu').value.trim()
+    const text = b.querySelector('#ut').value.trim()
+    if (!url && !text) return { msg:'订阅链接和订阅内容至少要填一个', field:'uu' }
+    if (url && !/^https?:\\/\\//.test(url)) return { msg:'链接要以 http:// 或 https:// 开头', field:'uu' }
+    // 第一次拉不通不直接判死刑，也不再叠一个弹窗 —— 这个表单本来就有粘贴框，
+    // 就地把话说清楚：要么把内容粘进来，要么再点一次先加进来。
+    let r = await api('/api/upstreams', { act:'add', name, url, text, force: b.__retry ? 1 : 0 })
+    if (!r.ok && (r.canPaste || r.canForce) && !b.__retry) {
+      b.__retry = 1
+      return { msg: r.msg + '。可以在浏览器里打开这个链接、全选复制，粘到下面的框里再保存；或者直接再点一次「添加」先把它加进来（暂时不会有节点）。', field:'ut' }
+    }
+    if (!r.ok) return { msg: r.msg || '添加失败', field: text ? 'ut' : 'uu' }
+    b.__up = r.up
+    return null
+  }})
   if (!box) return
-  const name = box.querySelector('#un').value.trim()
-  const url = box.querySelector('#uu').value.trim()
-  const text = box.querySelector('#ut').value.trim()
-  if (!url && !text) return toast('订阅链接和订阅内容至少要填一个', true)
-  let r = await api('/api/upstreams', {act:'add', name, url, text})
-  // 试拉不通就问一句，而不是默默收下一个死链接
-  if (!r.ok && (r.canPaste || r.canForce)) {
-    const t2 = await pasteBox('这个链接拉不通', r.msg)
-    if (t2 === null) return
-    r = await api('/api/upstreams', t2 ? {act:'add', name, url, text:t2} : {act:'add', name, url, force:1})
-  }
-  if (!r.ok) return toast(r.msg, true)
-  toast(r.up && r.up.n ? \`已添加，解析到 \${r.up.n} 个节点\` : '已添加订阅源')
-  await syncUp(r.up)
+  toast(box.__up && box.__up.n ? \`已添加，解析到 \${box.__up.n} 个节点\` : '已添加订阅源')
+  await syncUp(box.__up)
 }
 window.editUp = async (id) => {
   const u = (ST.upstreams || []).find(x => x.id === id)
@@ -4290,23 +4319,24 @@ window.editUp = async (id) => {
     }
     b.querySelectorAll('#ua .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
     sync()
+  }, onSubmit: async b => {
+    const name = b.querySelector('#un').value.trim()
+    const url = b.querySelector('#uu').value.trim()
+    const text = b.querySelector('#ut').value.trim()
+    const a = selValue(b.querySelector('#ua')) === '1'
+    if (!url && !text) return { msg:'订阅链接和订阅内容至少要填一个', field:'uu' }
+    if (url && !/^https?:\\/\\//.test(url)) return { msg:'链接要以 http:// 或 https:// 开头', field:'uu' }
+    let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, text, force: b.__retry ? 1 : 0 })
+    if (!r.ok && (r.canPaste || r.canForce) && !b.__retry) {
+      b.__retry = 1
+      return { msg: r.msg + '。可以在浏览器里打开这个链接、全选复制，粘到下面的框里再保存；或者直接再点一次「保存」（在拿到能用的链接前它不会有新节点）。', field:'ut' }
+    }
+    if (!r.ok) return { msg: r.msg || '保存失败', field: text ? 'ut' : 'uu' }
+    b.__up = r.up
+    return null
   }})
   if (!box) return
-  const name = box.querySelector('#un').value.trim()
-  const url = box.querySelector('#uu').value.trim()
-  const text = box.querySelector('#ut').value.trim()
-  const a = selValue(box.querySelector('#ua')) === '1'
-  if (!url && !text) return toast('订阅链接和订阅内容至少要填一个', true)
-  let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, text })
-  if (!r.ok && (r.canPaste || r.canForce)) {
-    const t2 = await pasteBox('新链接拉不通', r.msg)
-    if (t2 === null) return
-    r = await api('/api/upstreams', t2
-      ? { act:'edit', id, name, url, auto:a, text:t2 }
-      : { act:'edit', id, name, url, auto:a, force:1 })
-  }
-  if (!r.ok) return toast(r.msg, true)
-  toast(r.up && r.up.n ? \`已保存，抓到 \${r.up.n} 个节点\` : '已保存')
+  toast(box.__up && box.__up.n ? \`已保存，抓到 \${box.__up.n} 个节点\` : '已保存')
   await syncUp(null)
 }
 window.delUp = async (id, name) => {
