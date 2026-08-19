@@ -1191,6 +1191,35 @@ function triesMsg(tries) {
   return parts.join('；')
 }
 
+// 分享链接 → 自有节点的表单字段。复用 parseShareLine，避免前后端各写一套解析：
+// 那样迟早出现「订阅里能认、手动添加却认不出」这种自相矛盾。
+function shareToOwn(link) {
+  const kv = parseShareLine(String(link || '').trim())
+  if (!kv) return null
+  const v = k => kv[k] === undefined ? '' : unquote(kv[k])
+  const t = v('type')
+  if (t !== 'vless' && t !== 'hysteria2')
+    return { err: `这条链接是 ${t} 协议，自有节点目前只支持 VLESS Reality 与 Hysteria2` }
+  const o = { name: kv._name || '', type: t, s: v('server'), p: v('port') }
+  if (t === 'vless') {
+    o.u = v('uuid')
+    o.sni = v('servername') || v('sni')
+    const ro = parseFlow(v('reality-opts'))
+    o.pk = ro['public-key'] || ''
+    o.sid = ro['short-id'] || ''
+    o.net = v('network') === 'xhttp' ? 'xhttp' : 'tcp'
+    o.flow = v('flow') || (o.net === 'tcp' ? 'xtls-rprx-vision' : '')
+    if (!o.pk) o.warn = '这条链接里没有 Reality 公钥（pbk），保存前要手动补上'
+  } else {
+    o.u = v('password')
+    o.sni = v('sni') || v('servername')
+    o.obfs = v('obfs') || ''
+    o.opwd = v('obfs-password') || ''
+    o.ports = v('ports') || ''
+  }
+  return { node: o }
+}
+
 // 人工粘贴进来的订阅原文。和网络拉取共用 feedParse —— 两边各写一套解析的话，
 // 迟早出现「诊断说能解析、粘进来却是空的」这种自相矛盾。
 // 少的只是 subscription-userinfo 响应头，用量与到期只能从公告文本里捡。
@@ -1912,6 +1941,16 @@ async function apiRoute(req, url, event) {
       return json({ ok: true, settings: clean })
     }
     return json({ ok: true, settings: await loadSettings(), dnsGroups: DNS_GROUPS })
+  }
+
+  // 分享链接解析：手动添加自有节点时，粘一条链接自动填好表单
+  if (p === '/api/parse-share' && req.method === 'POST') {
+    const { link } = await req.json().catch(() => ({}))
+    if (!String(link || '').trim()) return json({ ok: false, msg: '请先粘贴链接' }, 400)
+    const r = shareToOwn(link)
+    if (!r) return json({ ok: false, msg: '认不出这条链接 —— 需要 vless:// 或 hysteria2:// 开头的完整分享链接' }, 400)
+    if (r.err) return json({ ok: false, msg: r.err }, 400)
+    return json({ ok: true, node: r.node })
   }
 
   // 自有节点：BWG 上自建的节点，与机场订阅无关，独立存 KV
@@ -2777,6 +2816,9 @@ code{background:var(--bg);border:1px solid var(--bd2);border-radius:5px;padding:
 .alert{background:var(--warnBg);border:1px solid var(--warnBd);color:var(--warn);padding:10px 14px;border-radius:10px;font-size:13px;margin-top:14px;display:flex;gap:8px;align-items:center}
 .empty{color:var(--tx3);font-size:13px;padding:4px 0}
 .hint{color:var(--tx3);font-size:12px;margin-top:7px;line-height:1.65}
+.ferr{color:var(--warn);font-size:12px;margin-top:7px;line-height:1.6;font-weight:500}
+input.bad,textarea.bad{border-color:var(--warnBd);background:var(--warnBg)}
+input.bad:focus,textarea.bad:focus{border-color:var(--warn);box-shadow:0 0 0 3.5px var(--warnBg)}
 
 @keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 .anim{animation:up .42s var(--e) both}
@@ -2890,7 +2932,7 @@ function toast(msg, err){
   el.dataset.t = setTimeout(el.kill, 2600)
 }
 
-function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, noCancel = false, onMount}){
+function modal({title, desc, html = '', fields = [], ok = '确定', danger = false, wide = false, noCancel = false, onMount, onSubmit}){
   return new Promise(resolve => {
     const bd = document.createElement('div')
     bd.className = 'bd'
@@ -2928,7 +2970,38 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
       setTimeout(done, 400)
       resolve(v)
     }
-    const submit = () => close(html ? box : (fields.length ? inputs.map(i => i.value.trim()) : true))
+    // onSubmit 返回错误就把弹窗留住并把话说在出错的字段旁边。
+    // 关掉弹窗再弹个 toast 让人重填，是这个表单以前最招人烦的地方 ——
+    // 十几个字段填完，因为一处格式不对全部清空重来。
+    const okBtn = bd.querySelector('[data-ok]')
+    const submit = async () => {
+      if (!onSubmit) return close(html ? box : (fields.length ? inputs.map(i => i.value.trim()) : true))
+      if (okBtn.disabled) return
+      box.querySelectorAll('.ferr').forEach(e => e.remove())
+      box.querySelectorAll('.bad').forEach(e => e.classList.remove('bad'))
+      okBtn.disabled = true
+      const old = okBtn.textContent
+      okBtn.textContent = '保存中…'
+      let err = null
+      try { err = await onSubmit(box) } catch (e) { err = String(e && e.message || e) }
+      okBtn.disabled = false
+      okBtn.textContent = old
+      if (!err) return close(box)
+      const msg = typeof err === 'string' ? err : err.msg
+      const fid = typeof err === 'string' ? null : err.field
+      const target = fid && box.querySelector('#' + fid)
+      const holder = (target && target.closest('.fg')) || box.querySelector('.ct')
+      if (target) {
+        target.classList.add('bad')
+        target.focus()
+        if (target.select) try { target.select() } catch (_) {}
+      }
+      const tip = document.createElement('div')
+      tip.className = 'ferr'
+      tip.textContent = msg
+      holder.appendChild(tip)
+      tip.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
     const onKey = e => {
       if (e.key === 'Escape') { if (bd.querySelector('.sel.open')) return; close(null) }
       if (e.key === 'Enter' && !html && document.body.contains(bd)) submit()
@@ -3869,6 +3942,10 @@ window.editOwn = async (key) => {
   const ow = (OWN && OWN.own) || {}
   const n = isNew ? { name:'', type:'vless', s:'', p:443, u:'', sni:'', net:'tcp', flow:'xtls-rprx-vision', pk:'', sid:'', obfs:'salamander', opwd:'', ports:'' } : JSON.parse(JSON.stringify(ow[key]))
   const html = \`
+    \${isNew ? \`<div class="fg"><label class="lb">从分享链接导入<span class="opt">可选</span></label>
+      <div class="row"><input id="oimp" placeholder="vless://… 或 hysteria2://…">
+        <button type="button" class="g" id="oimpb" style="white-space:nowrap">解析填充</button></div>
+      <div class="hint">粘贴节点的分享链接，自动填好下面各项，再补个标识就能存。</div></div>\` : ''}
     <div class="fg"><label class="lb">节点标识\${isNew ? '' : '（不可改）'}</label>
       <input id="ok" value="\${esc(key || '')}" placeholder="如 usV2，仅字母数字" \${isNew ? '' : 'disabled style="opacity:.55"'}>
       <div class="hint">策略通过 <code>own:标识</code> 指向该节点，改了会让现有策略失效。</div></div>
@@ -3904,29 +3981,82 @@ window.editOwn = async (key) => {
     }
     b.querySelectorAll('#ot .selo').forEach(o => o.addEventListener('click', () => setTimeout(sync, 0)))
     sync()
+
+    const impb = b.querySelector('#oimpb')
+    if (impb) impb.addEventListener('click', async () => {
+      b.querySelectorAll('.ferr').forEach(e => e.remove())
+      b.querySelectorAll('.bad').forEach(e => e.classList.remove('bad'))
+      const box2 = b.querySelector('#oimp')
+      const link = box2.value.trim()
+      const say = (m, warn) => {
+        const tip = document.createElement('div')
+        tip.className = 'ferr'
+        if (!warn) box2.classList.add('bad')
+        else tip.style.color = 'var(--tx2)'
+        tip.textContent = m
+        box2.closest('.fg').appendChild(tip)
+      }
+      if (!link) return say('先粘贴一条分享链接')
+      impb.disabled = true; impb.textContent = '解析中…'
+      const r = await api('/api/parse-share', { link })
+      impb.disabled = false; impb.textContent = '解析填充'
+      if (!r.ok) return say(r.msg || '解析失败')
+      const n2 = r.node
+      // 协议是自定义下拉，点一下对应项才会重绘显示
+      const opt = b.querySelector('#ot .selo[data-v="' + n2.type + '"]')
+      if (opt && b.querySelector('#ot').dataset.v !== n2.type) opt.click()
+      setTimeout(() => {
+        const put = (id, v) => { const el = b.querySelector('#' + id); if (el && v !== undefined && v !== null) el.value = v }
+        put('on', n2.name); put('os', n2.s); put('op', n2.p); put('ou', n2.u); put('osni', n2.sni)
+        if (n2.type === 'vless') {
+          put('opk', n2.pk); put('osid', n2.sid)
+          const no = b.querySelector('#onet .selo[data-v="' + (n2.net || 'tcp') + '"]')
+          if (no && b.querySelector('#onet').dataset.v !== (n2.net || 'tcp')) no.click()
+        } else {
+          put('oports', n2.ports); put('oobfs', n2.obfs || 'salamander'); put('oopwd', n2.opwd)
+        }
+        sync()
+        say(n2.warn || '已填入，检查无误后补个标识即可保存', !n2.warn)
+        const kf = b.querySelector('#ok')
+        if (kf && !kf.value) kf.focus()
+      }, 30)
+    })
+  }, onSubmit: async b => {
+    const val = id => b.querySelector('#' + id).value.trim()
+    const t = selValue(b.querySelector('#ot'))
+    // 标识只留字母数字和连字符。以前是静默剥掉再报「不能为空」，
+    // 填了中文的人会一头雾水 —— 现在直接说清楚剥完剩什么。
+    const raw = key || val('ok')
+    const k = raw.replace(/[^\w-]/g, '')
+    if (!raw) return { msg:'请填写节点标识', field:'ok' }
+    if (!k) return { msg:'标识只能用字母、数字和连字符，「' + raw + '」里没有可用字符', field:'ok' }
+    if (k !== raw) return { msg:'标识只能用字母、数字和连字符，去掉不支持的字符后是「' + k + '」，确认就再点一次保存', field:'ok' }
+    if (isNew && ow[k]) return { msg:'标识「' + k + '」已被「' + ow[k].name + '」占用', field:'ok' }
+    if (!val('on')) return { msg:'请填写节点名称', field:'on' }
+    if (!val('os')) return { msg:'请填写服务器地址', field:'os' }
+    if (!/^\d+$/.test(val('op')) || +val('op') < 1 || +val('op') > 65535) return { msg:'端口要是 1-65535 的数字', field:'op' }
+    if (!val('ou')) return { msg: t === 'vless' ? '请填写 UUID' : '请填写密码', field:'ou' }
+
+    const np = { name: val('on'), type: t, s: val('os'), p: val('op'), u: val('ou'), sni: val('osni') }
+    if (t === 'vless') {
+      // Reality 缺公钥会让客户端握手失败，报错极难定位，挡在这里
+      if (!val('opk')) return { msg:'VLESS Reality 必须填公钥', field:'opk' }
+      if (!val('osid')) return { msg:'VLESS Reality 必须填 ShortId', field:'osid' }
+      np.pk = val('opk'); np.sid = val('osid')
+      np.net = selValue(b.querySelector('#onet'))
+      np.flow = np.net === 'tcp' ? 'xtls-rprx-vision' : ''
+    } else {
+      np.ports = val('oports'); np.obfs = val('oobfs'); np.opwd = val('oopwd')
+    }
+    const r = await api('/api/own', { own: { ...ow, [k]: np } })
+    if (!r.ok) return r.msg || '保存失败'      // 服务端的话也留在弹窗里，不关
+    OWN = { ok:true, own: r.own }
+    return null
   }})
   if (!box) return
-
-  const k = (key || box.querySelector('#ok').value.trim()).replace(/[^\w-]/g,'')
-  if (!k) return toast('节点标识不能为空', true)
-  const t = selValue(box.querySelector('#ot'))
-  const np = { name: box.querySelector('#on').value.trim(), type: t,
-    s: box.querySelector('#os').value.trim(), p: box.querySelector('#op').value.trim(),
-    u: box.querySelector('#ou').value.trim(), sni: box.querySelector('#osni').value.trim() }
-  if (t === 'vless') {
-    np.pk = box.querySelector('#opk').value.trim(); np.sid = box.querySelector('#osid').value.trim()
-    np.net = selValue(box.querySelector('#onet'))
-    np.flow = np.net === 'tcp' ? 'xtls-rprx-vision' : ''
-  } else {
-    np.ports = box.querySelector('#oports').value.trim()
-    np.obfs = box.querySelector('#oobfs').value.trim()
-    np.opwd = box.querySelector('#oopwd').value.trim()
-  }
-  const next = { ...ow, [k]: np }
-  const r = await api('/api/own', { own: next })
-  if (!r.ok) return toast(r.msg || '保存失败', true)
-  OWN = { ok:true, own: r.own }; POL = null; PRF = null   // targets 与档案选项都依赖自有节点
-  toast(isNew ? '已添加节点' : '已保存'); dash(true)
+  POL = null; PRF = null
+  toast(isNew ? '已添加' : '已保存')
+  dash(true)
 }
 
 window.delOwn = async (key, name) => {

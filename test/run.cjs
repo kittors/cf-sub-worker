@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS,shareToOwn}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1761,6 +1761,68 @@ sec('43. 境外 DNS 查询必须走代理')
   ok(/境外 DNS 走代理/.test(ui), 'DNS 设置里有这个开关')
   ok(/id="dviap"/.test(ui), '有对应控件')
   ok(/remoteViaProxy: box\.querySelector\('#dviap'\)/.test(ui), '保存时会提交')
+}
+
+sec('44. 自有节点：表单校验不再清空重填')
+{
+  // 原来的流程是：填十几个字段 → 点保存 → 弹窗关闭 → 角落弹个 toast → 全部重填。
+  // 而且标识里的非法字符是静默剥掉再报「不能为空」，填了中文的人根本不知道发生了什么。
+  const ui = T.adminHTML(true, true)
+  ok(/function modal\(\{[^}]*onSubmit\}\)/.test(ui), 'modal 支持 onSubmit 钩子')
+  ok(/if \(!err\) return close\(box\)/.test(ui), '只有校验通过才关闭弹窗')
+  ok(/okBtn\.disabled = true/.test(ui), '提交中禁用按钮，防重复提交')
+  ok(/target\.classList\.add\('bad'\)/.test(ui), '出错时高亮对应字段')
+  ok(/tip\.className = 'ferr'/.test(ui), '错误信息显示在字段旁而不是 toast')
+  ok(/\.ferr\{color:var\(--warn\)/.test(ui), '有对应样式')
+  ok(/input\.bad,textarea\.bad\{border-color/.test(ui), '出错字段有视觉标记')
+
+  // 逐项校验都带 field，能定位到具体输入框
+  ok(/field:'ok'/.test(ui) && /field:'on'/.test(ui) && /field:'os'/.test(ui) &&
+     /field:'op'/.test(ui) && /field:'ou'/.test(ui), '标识/名称/服务器/端口/密钥都能定位')
+  ok(/field:'opk'/.test(ui) && /field:'osid'/.test(ui), 'Reality 公钥与 ShortId 也能定位')
+  ok(/里没有可用字符/.test(ui), '标识全是非法字符时说清楚原因，而不是报「不能为空」')
+  ok(/去掉不支持的字符后是/.test(ui), '标识含部分非法字符时给出清洗后的结果让人确认')
+  ok(/已被「/.test(ui), '标识重复时指出被谁占用')
+  ok(/端口要是 1-65535 的数字/.test(ui), '端口有范围校验')
+  ok(/return r\.msg \|\| '保存失败'/.test(ui), '服务端报错也留在弹窗里，不关闭')
+}
+
+sec('45. 自有节点：分享链接快捷添加')
+{
+  const S = T.shareToOwn
+  const hy = S('hysteria2://PWD123@hk.example.com:8443/?obfs=salamander&obfs-password=OB123&sni=hk.example.com&mport=50000-50020')
+  ok(hy && hy.node.type === 'hysteria2', 'hysteria2 链接可解析')
+  ok(hy && hy.node.s === 'hk.example.com' && hy.node.p === '8443', '服务器与端口')
+  ok(hy && hy.node.u === 'PWD123', '密码取自 userinfo')
+  ok(hy && hy.node.obfs === 'salamander' && hy.node.opwd === 'OB123', 'obfs 与 obfs-password')
+  ok(hy && hy.node.ports === '50000-50020', '端口跳跃取自 mport')
+  ok(hy && hy.node.sni === 'hk.example.com', 'sni')
+
+  const vl = S('vless://11111111-2222-3333-4444-555555555555@hk.example.com:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.bing.com&fp=chrome&pbk=PUBKEY123&sid=a59fd0ae2f7d509b&type=tcp#hk2-reality')
+  ok(vl && vl.node.type === 'vless', 'vless 链接可解析')
+  ok(vl && vl.node.u === '11111111-2222-3333-4444-555555555555', 'UUID')
+  ok(vl && vl.node.pk === 'PUBKEY123' && vl.node.sid === 'a59fd0ae2f7d509b', 'Reality 公钥与 ShortId')
+  ok(vl && vl.node.sni === 'www.bing.com', 'SNI 伪装域名')
+  ok(vl && vl.node.net === 'tcp' && vl.node.flow === 'xtls-rprx-vision', 'TCP + Vision 流控')
+  ok(vl && vl.node.name === 'hk2-reality', '节点名取自链接末尾的锚点')
+  ok(!vl.node.warn, '信息齐全时不告警')
+
+  // 缺 pbk 的 vless 存下去会让客户端握手失败，且报错极难定位
+  const noPk = S('vless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=reality&type=tcp#x')
+  ok(noPk && /没有 Reality 公钥/.test(noPk.node.warn || ''), '缺公钥时给出提示')
+
+  // 自有节点只支持这两种协议，其它要说明白而不是静默失败
+  const tj = S('trojan://pwd@a.example.com:443#T')
+  ok(tj && /只支持 VLESS Reality 与 Hysteria2/.test(tj.err || ''), '不支持的协议给出明确说明')
+  ok(S('随便一段文字') === null && S('') === null, '非链接返回 null')
+
+  const ui = T.adminHTML(true, true)
+  ok(/从分享链接导入/.test(ui), '添加弹窗里有导入入口')
+  ok(/id="oimpb"/.test(ui), '有解析按钮')
+  ok(/api\('\/api\/parse-share'/.test(ui), '调用解析接口')
+  ok(/opt\.click\(\)/.test(ui), '协议下拉是自定义组件，靠点击触发重绘')
+  ok(!/从分享链接导入[\s\S]{0,200}isNew \? '' :/.test(ui) && /isNew \?[\s\S]{0,80}从分享链接导入/.test(ui),
+     '只在新建时显示导入框（编辑已有节点时标识不可改）')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
