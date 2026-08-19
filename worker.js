@@ -3964,7 +3964,6 @@ window.editOwn = async (key) => {
     \${isNew ? '' : \`<div class="fg"><label class="lb">节点标识（自动生成，不可改）</label>
       <input value="\${esc(key || '')}" disabled style="opacity:.5">
       <div class="hint">分流策略在内部通过它指向这个节点，所以建好之后不能再变。</div></div>\`}
-      <div class="hint">策略通过 <code>own:标识</code> 指向该节点，改了会让现有策略失效。</div></div>
     <div class="fg"><label class="lb">节点名称</label><input id="on" value="\${esc(n.name)}" placeholder="如 美西-AI-Vision"></div>
     <div class="fg"><label class="lb">协议</label>
       \${selectHTML('ot', [{v:'vless',label:'VLESS + Reality'},{v:'hysteria2',label:'Hysteria2'}], n.type)}</div>
