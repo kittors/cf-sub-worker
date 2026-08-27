@@ -405,10 +405,8 @@ const PRESETS = {
     'openaiapi-site.azureedge.net','production-openaicom-storage.azureedge.net',
     'openaicomproductionae4b.blob.core.windows.net','openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net'
   ]},
-  ai: { name: 'AI 服务', hint: 'Claude / Gemini / DeepSeek / Copilot 等', domains: [
+  ai: { name: 'AI 服务', hint: 'Claude / DeepSeek / Copilot 等；Gemini 归 google 预置集', domains: [
     'anthropic.com','claude.ai','api.anthropic.com',
-    'googleapis.com','gemini.google.com','generativelanguage.googleapis.com',
-    'bard.google.com','deepmind.google','aistudio.google.com',
     'cohere.ai','api.cohere.ai','mistral.ai','api.mistral.ai',
     'perplexity.ai','perplexity.com','githubcopilot.com','copilot.microsoft.com',
     'huggingface.co','together.xyz','fireworks.ai','groq.com','api.groq.com',
@@ -417,10 +415,14 @@ const PRESETS = {
   aitest: { name: 'IP 检测', hint: '验证出口用，务必与服务端 ai-proxy 表保持一致', domains: [
     'ping0.cc','ip.net.coffee'
   ]},
-  google: { name: 'Google', hint: '账号基础设施；不整族同出口会被判定异地', domains: [
+  google: { name: 'Google', hint: '账号基础设施 + Gemini；不整族同出口会被判定异地', domains: [
     'google.com','gstatic.com','googleusercontent.com','google.cn',
     'googlesource.com','googletagmanager.com','google-analytics.com',
-    'dns.google','withgoogle.com','goo.gl','ggpht.com'
+    'dns.google','withgoogle.com','goo.gl','ggpht.com',
+    // Gemini / AI Studio 跑在 Google 账号体系上，认证走 accounts.google.com。
+    // 放进 AI 组会让它和账号域名分到两个出口，Google 直接判异常流量。
+    'googleapis.com','gemini.google.com','generativelanguage.googleapis.com',
+    'bard.google.com','deepmind.google','aistudio.google.com'
   ]},
   media: { name: '流媒体', hint: 'Netflix / Disney+ / Spotify / Twitch 等', domains: [
     'netflix.com','nflxvideo.net','nflximg.net','nflxext.com','nflxso.net',
@@ -486,7 +488,12 @@ const DEFAULT_POLICIES = [
   { id:'media',   name:'🎬 流媒体',    target:'region:jp',  strict:false, presets:['media'],   domains:[], keywords:[], processes:[], enabled:true },
   { id:'social',  name:'💬 社交媒体',  target:'region:jp',  strict:false, presets:['social'],  domains:[], keywords:[], processes:[], enabled:true },
   { id:'openai',  name:'🤖 OpenAI',   target:'own:usV2',   strict:true,  presets:['openai'],  domains:[], keywords:[], processes:['ChatGPT'], enabled:true },
-  { id:'ai',      name:'🤖 AI 服务',   target:'own:usV2',   strict:true,  presets:['ai','aitest','google'], domains:[], keywords:[], processes:[], enabled:true },
+  // Google 单独一组，不跟其它 AI 混。Gemini 对出口 IP 的信誉要求比搜索高得多——
+  // 同一个 IP 搜索能正常返回，Gemini 却会被 302 打到 /sorry/。共享 VPS（搬瓦工这类）
+  // 和多人共用的第三方落地基本都进了黑名单，这一组必须指向独占且未被标记的出口。
+  // strict 不能关：回落到别的节点就是 Google 全族跨出口，照样触发风控。
+  { id:'google',  name:'🔍 Google',   target:'own:usGoogle', strict:true, presets:['google'], domains:[], keywords:[], processes:[], enabled:true },
+  { id:'ai',      name:'🤖 AI 服务',   target:'own:usV2',   strict:true,  presets:['ai','aitest'], domains:[], keywords:[], processes:[], enabled:true },
   { id:'crypto',  name:'💰 加密货币',  target:'own:usV2',   strict:false, presets:['crypto'],  domains:[], keywords:['binance'], processes:[], enabled:true },
   { id:'tg',      name:'✈️ Telegram', target:'all',        strict:false, presets:['telegram'],domains:[], keywords:[], processes:[], enabled:true },
   { id:'dev',     name:'⚙️ 开发者',    target:'all',        strict:false, presets:['dev'],     domains:[], keywords:[], processes:[], enabled:true },
