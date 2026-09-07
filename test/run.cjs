@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS,shareToOwn}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS,shareToOwn,genSR,detectFmt}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -1996,7 +1996,89 @@ sec('49. 自有节点的服务器地址不得被改写')
   ok(!/directIPs\)\s*\|\|\s*\[\]\)\[0\]/.test(src), '不再有「取第一个直连 IP 当节点地址」的逻辑')
 }
 
+sec('50. Shadowrocket 原生 conf')
+{
+  const sr = T.genSR(false, up, P, LIB, OWN, SET)
+  ok(/\[General\]/.test(sr) && /\[Proxy\]/.test(sr) && /\[Proxy Group\]/.test(sr) && /\[Rule\]/.test(sr), '含 [General]/[Proxy]/[Proxy Group]/[Rule]')
+
+  const vlessLine = sr.split('\n').find(l => l.startsWith(OWN.usV2.name + ' ='))
+  const hy2Line = sr.split('\n').find(l => l.startsWith(OWN.usH.name + ' ='))
+  ok(vlessLine && /\bvless\b/.test(vlessLine) && /public-key=/.test(vlessLine) && vlessLine.includes(OWN.usV2.u), '自有 VLESS 含 vless、public-key 与 uuid')
+  ok(hy2Line && /\bhysteria2\b/.test(hy2Line) && /auth=/.test(hy2Line), '自有 HY2 含 hysteria2 与 auth=')
+
+  const ridx = d => {
+    const lines = sr.split('\n')
+    return lines.findIndex(l => l.startsWith('DOMAIN-SUFFIX,' + d + ','))
+  }
+  ok(ridx('youtube.com') >= 0 && ridx('googleapis.com') >= 0 && ridx('youtube.com') < ridx('googleapis.com'), 'YouTube DOMAIN-SUFFIX 先于 googleapis')
+  ok(ridx('youtubei.googleapis.com') < ridx('googleapis.com'), 'youtubei 先于 googleapis')
+  ok(!/PROCESS-NAME/.test(sr), 'SR 不含 PROCESS-NAME')
+
+  const yt = sr.split('\n').find(l => l.startsWith('📺 YouTube ='))
+  ok(yt && /🇯🇵 日本/.test(yt) && /🚀 节点选择/.test(yt) && /DIRECT/.test(yt), 'YouTube 组含日本组与回退')
+  ok(yt && !/🇯🇵 日本 \d/.test(yt), 'YouTube 组不罗列每个机场节点')
+  const ytMembers = yt ? yt.split(',').map(s => s.trim()) : []
+  ok(ytMembers.length <= 6, `YouTube 组很小（${ytMembers.length} 段）`)
+
+  ok(!/fake-ip/i.test(sr) && !/GEOSITE/i.test(sr), '不含 Clash fake-ip / GEOSITE')
+  ok(/FINAL,🚀 节点选择/.test(sr), '白名单兜底走节点选择')
+  ok(/FINAL,DIRECT/.test(T.genSR(true, up, P, LIB, OWN, SET)), '黑名单兜底走 DIRECT')
+  ok(/bypass-system = true/.test(sr) && /dns-server = /.test(sr), '[General] 含 bypass-system 与 dns-server')
+  ok(/ipv6 = false/.test(sr), 'iOS 关闭 IPv6，避免 TUN 双栈导致整机没网')
+  ok(!/dns-server = [^\n]*https:\/\//.test(sr), 'dns-server 不含 DoH URL')
+
+  ok(T.detectFmt('Clash Verge/v2.4.0', '') === 'clash', 'Clash Verge UA → clash')
+  ok(T.detectFmt('clash-verge/v2.0.0', '') === 'clash', 'clash-verge UA → clash')
+  ok(T.detectFmt('Shadowrocket/2.2.65 CFNetwork', '') === 'shadowrocket', 'Shadowrocket UA → shadowrocket')
+  ok(T.detectFmt('Mozilla/5.0', 'sr') === 'shadowrocket', 'fmt=sr → shadowrocket')
+  ok(T.detectFmt('Clash Verge', 'shadowrocket') === 'shadowrocket', 'fmt=shadowrocket 优先于 UA')
+  ok(T.detectFmt('sing-box', '') === 'singbox', 'sing-box UA → singbox')
+  ok(T.detectFmt('Clash Verge', 'singbox') === 'singbox', 'fmt=singbox → singbox')
+  ok(T.detectFmt('Shadowrocket/2.2', 'clash') === 'clash', '显式 fmt=clash 压过 Shadowrocket UA')
+  ok(T.detectFmt('v2rayN/6.45', '') === 'clash', 'v2rayN UA → clash')
+  ok(T.detectFmt('', 'v2rayn') === 'clash', 'fmt=v2rayn → clash')
+  ok(T.detectFmt('', 'share') === 'share', 'fmt=share → share')
+  ok(T.detectFmt('CFNetwork/1496.0.7 Darwin/23.5.0', '') === 'shadowrocket', 'Mac 更新常用 CFNetwork UA → shadowrocket')
+  ok(T.detectFmt('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15', '') === 'clash', 'Safari 仍走 Clash')
+  ok(T.detectFmt('', '', 'shadowrocket') === 'shadowrocket', 'flag=shadowrocket → conf')
+  ok(T.detectFmt('CFNetwork/1 Darwin/1', 'clash', 'shadowrocket') === 'clash', '显式 fmt=clash 压过 flag')
+
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(/detectFmt\(ua, url\.searchParams\.get\('fmt'\), url\.searchParams\.get\('flag'\)\)/.test(src), 'handle 走 detectFmt')
+  ok(!/fmt === 'sr' \|\| fmt === 'shadowrocket' \|\| fmt === 'v2rayn'\) fmt = 'clash'/.test(src), '不再把 SR 并进 clash')
+
+  const ui = T.adminHTML(true, true)
+  ok(/fmt=shadowrocket/.test(ui), '管理端提示 &fmt=shadowrocket')
+  ok(/Shadowrocket 同一地址按 UA 下发原生 conf/.test(ui), '提示 SR 是原生 conf')
+  ok(!/Shadowrocket · v2rayN 直接用地址即可/.test(ui), '不再把 Shadowrocket 和 Clash YAML 捆在一起')
+
+  const cdConf = T.contentDisposition('主订阅', 'conf')
+  ok(/filename="subscription\.conf"/.test(cdConf), 'SR ASCII 文件名补 .conf')
+  const star = decodeURIComponent((cdConf.match(/filename\*=UTF-8''(.+)$/) || [])[1] || '')
+  ok(star === '主订阅.conf', 'filename* 为档案名 + .conf')
+
+  // 未知协议跳过，不写半成品行
+  const weird = [{ name: '👻 未知', region: 'jp', kv: { type: 'wireguard', server: 'x.example.invalid', port: '443' } }]
+  const srSkip = T.genSR(false, weird, [], LIB, {}, SET)
+  ok(!/wireguard/.test(srSkip) && !/👻 未知 = /.test(srSkip), '未知协议整节点跳过')
+}
+
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)
 process.exit(fail ? 1 : 0)
 
 })()
+
+
+sec('targetList / own-node orphan (multi-target)')
+{
+  const pol = { name: 'OpenAI', target: ['own:usV2', 'region:us'] }
+  const bad = String(pol.target).startsWith('own:') && !OWN[String(pol.target).slice(4)]
+  ok(bad === true, '旧写法会对多目标策略误判悬空')
+  const refs = []
+  for (const tg of T.targetList(pol)) {
+    if (String(tg).startsWith('own:')) refs.push(String(tg).slice(4))
+  }
+  ok(refs.length === 1 && refs[0] === 'usV2', 'targetList 只抽出 own:usV2')
+  ok(!!OWN[refs[0]], '抽出的 key 在自有节点表里存在，不应拦保存')
+}
+

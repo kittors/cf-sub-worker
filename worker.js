@@ -541,12 +541,19 @@ async function loadProfiles() {
 // 订阅名下发给客户端。HTTP 头只能是 ASCII，中文得按 RFC 6266 编码成
 // filename*，同时留一份 ASCII 的 filename 给不认 filename* 的老客户端。
 // 两个都给时，认得 filename* 的客户端会优先用它。
-function contentDisposition(name) {
+function contentDisposition(name, ext) {
   const n = String(name || '').trim().slice(0, 60) || '订阅'
   // 引号和反斜杠会截断头部，控制字符更是直接让整个响应非法
   const ascii = n.replace(/[^\x20-\x7E]/g, '').replace(/["\\;]/g, '').trim()
-  const fallback = ascii || 'subscription'
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(n)}`
+  let fallback = ascii || 'subscription'
+  let star = n
+  const e = String(ext || '').replace(/^\./, '')
+  if (e && /^[A-Za-z0-9]+$/.test(e)) {
+    const suf = '.' + e
+    if (!/\.[A-Za-z0-9]+$/.test(fallback)) fallback += suf
+    if (!/\.[A-Za-z0-9]+$/.test(star)) star += suf
+  }
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(star)}`
 }
 
 // ---------- 链式代理 ----------
@@ -1389,6 +1396,28 @@ async function activeNodes(force, event) {
 
 // ---------- 请求入口 ----------
 
+// 显式 fmt 优先，否则按 UA 猜。sr/shadowrocket 下发原生 conf；v2rayN 仍走 Clash。
+function detectFmt(ua, fmtParam, flagParam) {
+  let fmt = String(fmtParam || '').toLowerCase().trim()
+  if (!fmt) fmt = String(flagParam || '').toLowerCase().trim()
+  const u = String(ua || '').toLowerCase()
+  if (fmt === 'sr' || fmt === 'shadowrocket') return 'shadowrocket'
+  if (fmt === 'v2rayn') return 'clash'
+  if (fmt === 'base64' || fmt === 'v2ray' || fmt === 'link') return 'share'
+  if (fmt === 'sing-box') fmt = 'singbox'
+  if (fmt) return fmt
+  if (u.includes('shadowrocket')) return 'shadowrocket'
+  if (/singbox|sing-box/.test(u)) return 'singbox'
+  // Shadowrocket（尤其 Mac 更新配置）经常只带 CFNetwork/Darwin，不带 App 名。
+  // 带 Mozilla 的是浏览器；Clash Verge / sing-box / v2rayN 有自己的 UA。
+  if (u.includes('cfnetwork') && u.includes('darwin')
+      && !u.includes('mozilla')
+      && !/clash|verge|stash|sing-box|singbox|v2ray|surge/.test(u)) {
+    return 'shadowrocket'
+  }
+  return 'clash'
+}
+
 async function handle(req, event) {
   const url = new URL(req.url)
   const path = url.pathname
@@ -1402,13 +1431,13 @@ async function handle(req, event) {
   if (!prof) return new Response('x', { status: 403 })
 
   // 格式判定：显式 fmt 优先，否则按 UA 猜。
-  // Shadowrocket 与 v2rayN 都能吃 Clash YAML，故并入 clash 分支；
-  // 只有明确要 base64 节点列表时才走 share（v2rayN 的 v2ray/Xray 内核场景）。
-  const ua = (req.headers.get('User-Agent') || '').toLowerCase()
-  let fmt = (url.searchParams.get('fmt') || '').toLowerCase()
-  if (fmt === 'sr' || fmt === 'shadowrocket' || fmt === 'v2rayn') fmt = 'clash'
-  if (fmt === 'base64' || fmt === 'v2ray' || fmt === 'link') fmt = 'share'
-  if (!fmt) fmt = /singbox|sing-box/.test(ua) ? 'singbox' : 'clash'
+  // Shadowrocket 要原生 INI-like .conf，不能再并进 Clash YAML
+  // （fake-ip / GEOSITE / PROCESS-NAME / Reality YAML 在 iOS 上对不齐）。
+  // v2rayN 继续 Clash YAML；明确要 base64 节点列表时才走 share。
+  const ua = req.headers.get('User-Agent') || ''
+  // 路径强制 conf：Mac 小火箭「导入/更新」常用浏览器 UA，query 还可能被丢掉。
+  const pathForce = (path === '/sr' || path === '/shadowrocket' || /\.conf$/i.test(path)) ? 'shadowrocket' : ''
+  const fmt = pathForce || detectFmt(ua, url.searchParams.get('fmt'), url.searchParams.get('flag'))
 
   // ?upstream=0 应急开关：只下发自有节点
   const useUp = url.searchParams.get('upstream') !== '0'
@@ -1433,6 +1462,10 @@ async function handle(req, event) {
   // URL 上的 mode 优先，其次用档案自己的设定
   const mode = url.searchParams.get('mode') || prof.mode || 'whitelist'
   if (fmt === 'singbox') return new Response(genSB(f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'application/json; charset=utf-8' } })
+  if (fmt === 'shadowrocket') {
+    h['Content-Disposition'] = contentDisposition(prof.name, 'conf')
+    return new Response(genSR(mode === 'blacklist', f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'text/plain; charset=utf-8' } })
+  }
   return new Response(genClash(mode === 'blacklist', f.up, f.policies, lib, f.own, set, chains, up), { headers: { ...h, 'Content-Type': 'text/yaml; charset=utf-8' } })
 }
 
@@ -1975,14 +2008,20 @@ async function apiRoute(req, url, event) {
         const type = v.type === 'hysteria2' ? 'hysteria2' : 'vless'
         if (!name) return json({ ok: false, msg: '节点名称不能为空' }, 400)
         if (!v.s || !v.p || !v.u) return json({ ok: false, msg: `「${name}」缺少服务器/端口/密钥` }, 400)
-        // Reality 缺公钥会让客户端握手失败，报错信息又极难定位，提前挡住
-        if (type === 'vless' && (!v.pk || !v.sid)) return json({ ok: false, msg: `「${name}」是 VLESS Reality，必须填公钥与 ShortId` }, 400)
-
         const n = { name, type, s: String(v.s).trim(), p: parseInt(v.p, 10) || 443, u: String(v.u).trim(), sni: String(v.sni || '').trim() }
         if (type === 'vless') {
-          n.pk = String(v.pk).trim(); n.sid = String(v.sid).trim()
-          n.net = v.net === 'xhttp' ? 'xhttp' : 'tcp'
-          n.flow = n.net === 'tcp' ? (v.flow || 'xtls-rprx-vision') : ''
+          const net = (v.net === 'xhttp' || v.net === 'ws') ? v.net : 'tcp'
+          n.net = net
+          if (net === 'ws') {
+            n.path = String(v.path || '/').trim() || '/'
+            if (v.host) n.host = String(v.host).trim()
+            n.flow = ''
+          } else {
+            // Reality 缺公钥会让客户端握手失败，报错信息又极难定位，提前挡住
+            if (!v.pk || !v.sid) return json({ ok: false, msg: `「${name}」是 VLESS Reality，必须填公钥与 ShortId` }, 400)
+            n.pk = String(v.pk).trim(); n.sid = String(v.sid).trim()
+            n.flow = net === 'tcp' ? (v.flow || 'xtls-rprx-vision') : ''
+          }
         } else {
           if (v.ports) n.ports = String(v.ports).trim()
           n.obfs = String(v.obfs || 'salamander').trim()
@@ -1994,10 +2033,27 @@ async function apiRoute(req, url, event) {
       const names = Object.values(clean).map(n => n.name)
       if (new Set(names).size !== names.length) return json({ ok: false, msg: '节点名称重复，客户端会拒绝加载' }, 400)
 
-      // 被删掉的节点若仍被策略指向会产生悬空引用，挡在保存前
-      const pols = await loadPolicies()
-      const orphan = pols.filter(x => String(x.target).startsWith('own:') && !clean[String(x.target).slice(4)])
-      if (orphan.length) return json({ ok: false, msg: `策略「${orphan[0].name}」正指向将被删除的节点，请先改它的分流目标` }, 400)
+      // 被删掉的节点若仍被策略指向会产生悬空引用，挡在保存前。
+      // target 可能是字符串（老数据）或数组（多选目标）；必须用 targetList，
+      // 不能 String(target)：['own:a','region:us'] 会变成 'own:a,region:us'，
+      // 既误判悬空，也会让「只是在添加节点」的保存全部失败。
+      const refd = []
+      const note = (polName, key) => { if (!refd.some(x => x.key === key)) refd.push({ name: polName, key }) }
+      for (const pol of await loadPolicies()) {
+        for (const tg of targetList(pol)) {
+          if (String(tg).startsWith('own:')) note(pol.name, String(tg).slice(4))
+        }
+      }
+      for (const prof of await loadProfiles()) {
+        if (!Array.isArray(prof.policies)) continue
+        for (const pol of prof.policies) {
+          for (const tg of targetList(pol)) {
+            if (String(tg).startsWith('own:')) note(`${prof.name || '订阅'}/${pol.name}`, String(tg).slice(4))
+          }
+        }
+      }
+      const orphan = refd.find(x => !clean[x.key])
+      if (orphan) return json({ ok: false, msg: `策略「${orphan.name}」仍引用自有节点「${orphan.key}」，请先改它的分流目标，或保留该节点后再保存` }, 400)
 
       await kvPut('nodes', clean)
       return json({ ok: true, own: clean })
@@ -2110,24 +2166,47 @@ function genClash(blacklist, up, policies, lib, own, st, chains, pool) {
   let pl = ''
   Object.values(own).forEach(n => {
     if (n.type === 'vless') {
-      pl += [
-        `  - name: "${n.name}"`,
-        `    type: vless`,
-        `    server: ${n.s}`,
-        `    port: ${n.p}`,
-        `    uuid: ${n.u}`,
-        `    tls: true`,
-        `    servername: ${n.sni}`,
-        `    reality-opts:`,
-        `      public-key: ${n.pk}`,
-        `      short-id: ${n.sid}`,
-        `    client-fingerprint: chrome`,
-        ...(n.net === 'tcp'
-          ? [`    flow: ${n.flow}`, `    network: tcp`]
-          : [`    network: xhttp`, `    xhttp-opts:`, `      path: /`, `      mode: auto`]),
-        `    udp: true`,
-        `\n`
-      ].join('\n')
+      if (n.net === 'ws') {
+        const host = n.host || n.sni || n.s
+        pl += [
+          `  - name: "${n.name}"`,
+          `    type: vless`,
+          `    server: ${n.s}`,
+          `    port: ${n.p}`,
+          `    uuid: ${n.u}`,
+          `    tls: true`,
+          `    servername: ${n.sni || n.s}`,
+          `    client-fingerprint: chrome`,
+          `    network: ws`,
+          `    ws-opts:`,
+          `      path: ${n.path || '/'}`,
+          `      headers:`,
+          `        Host: ${host}`,
+          `      max-early-data: 2048`,
+          `      early-data-header-name: Sec-WebSocket-Protocol`,
+          `    udp: true`,
+          `\n`
+        ].join('\n')
+      } else {
+        pl += [
+          `  - name: "${n.name}"`,
+          `    type: vless`,
+          `    server: ${n.s}`,
+          `    port: ${n.p}`,
+          `    uuid: ${n.u}`,
+          `    tls: true`,
+          `    servername: ${n.sni}`,
+          `    reality-opts:`,
+          `      public-key: ${n.pk}`,
+          `      short-id: ${n.sid}`,
+          `    client-fingerprint: chrome`,
+          ...(n.net === 'tcp'
+            ? [`    flow: ${n.flow}`, `    network: tcp`]
+            : [`    network: xhttp`, `    xhttp-opts:`, `      path: /`, `      mode: auto`]),
+          `    udp: true`,
+          `\n`
+        ].join('\n')
+      }
     } else {
       pl += [
         `  - name: "${n.name}"`,
@@ -2426,6 +2505,10 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     { type: 'block', tag: 'block-out' },
     ...Object.values(own).map(n => {
       if (n.type === 'vless') {
+        if (n.net === 'ws') {
+          const host = n.host || n.sni || n.s
+          return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni || n.s, utls: { enabled: true, fingerprint: 'chrome' } }, transport: { type: 'ws', path: n.path || '/', headers: { Host: host }, max_early_data: 2048, early_data_header_name: 'Sec-WebSocket-Protocol' } }
+        }
         if (n.net === 'tcp') {
           return { type: 'vless', tag: n.name, server: n.s, server_port: n.p, uuid: n.u, flow: n.flow, packet_encoding: 'xudp', tls: { enabled: true, server_name: n.sni, utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: n.pk, short_id: n.sid } }, transport: { type: 'tcp' } }
         }
@@ -2501,6 +2584,262 @@ function genSB(up, policies, lib, own, st, chains, pool) {
     outbounds,
     route: { rules, final: '🚀 节点选择', auto_detect_interface: true }
   }, null, 2)
+}
+
+// ---------- Shadowrocket 原生 conf ----------
+// iOS 吃 INI-like .conf，不吃 Clash YAML：fake-ip / GEOSITE / PROCESS-NAME /
+// Reality 块字段对不齐，硬并进 clash 分支会让小火箭表现为「订阅能下、规则全失效」。
+function srName(s) {
+  return String(s || '').replace(/,/g, '，').replace(/=/g, '＝').trim()
+}
+function srParam(k, v) {
+  if (v === undefined || v === null || v === '') return null
+  const s = String(v)
+  if (/[\n,]/.test(s)) return `${k}="${s.replace(/"/g, '')}"`
+  return `${k}=${s}`
+}
+function srLine(name, type, server, port, params) {
+  if (!type || server === undefined || server === null || server === '' || port === undefined || port === null || port === '') return null
+  return `${srName(name)} = ${[type, String(server), String(port), ...(params || []).filter(Boolean)].join(', ')}`
+}
+function srNetOk(net) {
+  const n = String(net || 'tcp').toLowerCase()
+  return n === 'tcp' || n === 'ws' || n === 'none' || n === ''
+}
+function srWsParams(net, ws) {
+  if (String(net || '').toLowerCase() !== 'ws') return []
+  const host = (ws && ws.headers && (ws.headers.Host || ws.headers.host)) || ''
+  const path = (ws && ws.path) || ''
+  return ['obfs=ws', path ? srParam('obfs-path', path) : null, host ? srParam('obfs-header', host) : null]
+}
+
+function ownToSR(n) {
+  if (!n) return null
+  if (n.type === 'vless') {
+    if (!srNetOk(n.net)) return null
+    if (!n.u || !n.s || !n.p) return null
+    const params = [
+      srParam('password', n.u),
+      'udp=true',
+      'tls=true',
+      n.sni ? srParam('peer', n.sni) : null,
+      n.pk ? srParam('public-key', n.pk) : null,
+      n.sid ? srParam('short-id', n.sid) : null,
+      n.flow ? srParam('flow', n.flow) : null,
+      ...srWsParams(n.net, { path: n.path, headers: n.host ? { Host: n.host } : undefined })
+    ]
+    return srLine(n.name, 'vless', n.s, n.p, params)
+  }
+  if (n.type === 'hysteria2' || n.type === 'hy2') {
+    if (!n.u || !n.s || !n.p) return null
+    const params = [
+      srParam('auth', n.u),
+      n.sni ? srParam('peer', n.sni) : null,
+      'insecure=true',
+      'udp=true',
+      n.obfs ? srParam('obfs', n.obfs) : null,
+      n.opwd ? srParam('obfs-password', n.opwd) : null,
+      n.ports ? srParam('mport', n.ports) : null
+    ]
+    return srLine(n.name, 'hysteria2', n.s, n.p, params)
+  }
+  return null
+}
+
+function airportToSR(n) {
+  if (!n || !n.kv) return null
+  const v = k => n.kv[k] === undefined ? undefined : unquote(n.kv[k])
+  const t = v('type')
+  const server = v('server')
+  const port = v('port')
+  const sni = v('sni') || v('servername')
+  const insecure = v('skip-cert-verify') === 'true'
+  const net = v('network') || 'tcp'
+  const ws = parseFlow(v('ws-opts'))
+  const ro = parseFlow(v('reality-opts'))
+  const udp = v('udp') !== 'false'
+
+  if (t === 'ss') {
+    const plugin = v('plugin') || v('obfs')
+    if (plugin && plugin !== 'none' && plugin !== 'plain') return null
+    if (!v('cipher') || !v('password')) return null
+    return srLine(n.name, 'ss', server, port, [
+      srParam('encrypt-method', v('cipher')),
+      srParam('password', v('password')),
+      udp ? 'udp=true' : null
+    ])
+  }
+  if (t === 'vmess') {
+    if (!srNetOk(net)) return null
+    if (!v('uuid')) return null
+    const tls = v('tls') === 'true' || !!sni
+    return srLine(n.name, 'vmess', server, port, [
+      srParam('username', v('uuid')),
+      tls ? 'tls=true' : 'tls=false',
+      sni ? srParam('peer', sni) : null,
+      ...(String(net).toLowerCase() === 'ws' ? srWsParams(net, ws) : ['obfs=none']),
+      udp ? 'udp=true' : null
+    ])
+  }
+  if (t === 'vless') {
+    if (!srNetOk(net)) return null
+    if (!v('uuid')) return null
+    const isReality = !!ro['public-key']
+    const tls = v('tls') === 'true' || isReality || !!sni
+    return srLine(n.name, 'vless', server, port, [
+      srParam('password', v('uuid')),
+      udp ? 'udp=true' : null,
+      tls ? 'tls=true' : null,
+      sni ? srParam('peer', sni) : null,
+      ro['public-key'] ? srParam('public-key', ro['public-key']) : null,
+      ro['short-id'] ? srParam('short-id', ro['short-id']) : null,
+      v('flow') ? srParam('flow', v('flow')) : null,
+      ...srWsParams(net, ws)
+    ])
+  }
+  if (t === 'trojan') {
+    if (!srNetOk(net)) return null
+    if (!v('password')) return null
+    return srLine(n.name, 'trojan', server, port, [
+      srParam('password', v('password')),
+      'tls=true',
+      sni ? srParam('peer', sni) : null,
+      insecure ? 'insecure=true' : null,
+      udp ? 'udp=true' : null,
+      ...srWsParams(net, ws)
+    ])
+  }
+  if (t === 'hysteria2' || t === 'hy2') {
+    const pwd = v('password') || v('auth')
+    if (!pwd) return null
+    return srLine(n.name, 'hysteria2', server, port, [
+      srParam('auth', pwd),
+      sni ? srParam('peer', sni) : null,
+      insecure ? 'insecure=true' : null,
+      'udp=true',
+      v('obfs') ? srParam('obfs', v('obfs')) : null,
+      v('obfs-password') ? srParam('obfs-password', v('obfs-password')) : null,
+      v('ports') ? srParam('mport', v('ports')) : null
+    ])
+  }
+  if (t === 'anytls') {
+    // Shadowrocket 2.2.65+ 认 anytls；参数齐才能写，缺 password/server 就跳过，绝不半成品。
+    if (!v('password')) return null
+    return srLine(n.name, 'anytls', server, port, [
+      srParam('password', v('password')),
+      sni ? srParam('sni', sni) : null,
+      insecure ? 'insecure=true' : null,
+      udp ? 'udp=true' : null
+    ])
+  }
+  return null
+}
+
+function genSR(blacklist, up, policies, lib, own, st, chains, pool) {
+  const SET = { ...DEFAULT_SETTINGS, ...(st || {}) }
+  const D = { ...DEFAULT_DNS, ...(SET.dns || {}) }
+  const FORCED = SET.proxyDomains || []
+  // 链式在 SR 里没有忠实的 Relay 映射：硬塞落地会变成不带中转的直连、出口 IP 全变，故整条略过（同 genShare）。
+  void chains
+  void pool
+
+  const ownSR = {}
+  for (const [k, n] of Object.entries(own || {})) ownSR[k] = { ...n, name: srName(n.name) }
+
+  const ownLines = [], ownNames = []
+  for (const n of Object.values(ownSR)) {
+    const line = ownToSR(n)
+    if (!line) continue
+    ownLines.push(line)
+    ownNames.push(n.name)
+  }
+
+  const upLines = [], upKept = []
+  for (const n of (up || [])) {
+    const line = airportToSR(n)
+    if (!line) continue
+    const nn = { ...n, name: srName(n.name) }
+    // 名字被清洗后要让行内的 NAME 对得上分组引用
+    const reline = airportToSR(nn)
+    upLines.push(reline || line)
+    upKept.push(nn)
+  }
+
+  const liveR = REGIONS.filter(r => upKept.some(n => n.region === r.key))
+  const liveKeys = liveR.map(r => r.key)
+  const regionNames = liveR.map(r => `${r.flag} ${r.cn}`)
+  const allN = [...ownNames, ...upKept.map(n => n.name)]
+  const act = (policies || []).filter(p => p.enabled !== false)
+
+  // Shadowrocket 的 dns-server 只认 IP / system。把 Clash 的 DoH URL 塞进去会让解析全挂，表现为「完全没网」。
+  const dnsIP = [...(D.bootstrap || []), ...(D.domestic || []), ...(D.remote || []), '1.1.1.1', '8.8.8.8']
+    .map(x => String(x).trim())
+    .filter(x => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(x))
+  const dnsServer = [...new Set(dnsIP.length ? dnsIP : ['223.5.5.5', '1.1.1.1', '8.8.8.8']), 'system'].join(', ')
+
+  const groups = []
+  // 默认选中列表第一项。地区 url-test（尤其日本机场）经常超时，放首位会让整机没网。
+  // 自有节点在前，DIRECT 保底，机场地区组放后面。
+  const selectMembers = [...ownNames, 'DIRECT', ...regionNames, ...upKept.map(n => n.name)].filter((x, i, a) => x && a.indexOf(x) === i)
+  groups.push(`🚀 节点选择 = select, ${selectMembers.join(', ')}`)
+  if (allN.length) {
+    groups.push(`♻️ 自动选择 = url-test, ${allN.join(', ')}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50`)
+  }
+  for (const r of liveR) {
+    const ns = upKept.filter(n => n.region === r.key).map(n => n.name)
+    if (!ns.length) continue
+    groups.push(`${r.flag} ${r.cn} = url-test, ${ns.join(', ')}, url=http://www.gstatic.com/generate_204, interval=300, tolerance=50`)
+  }
+  for (const p of act) {
+    const t = resolveTargets(p, liveKeys, ownSR, null).map(srName)
+    // 不要用 policyMembers：Clash 非严格组会塞进每一个节点，SR 组保持小。
+    const mem = []
+    const add = x => { if (x && !mem.includes(x)) mem.push(x) }
+    t.forEach(add)
+    if (!p.strict) { add('🚀 节点选择'); add('DIRECT') }
+    groups.push(`${srName(p.name)} = select, ${mem.join(', ')}`)
+  }
+
+  const rules = []
+  rules.push('IP-CIDR,127.0.0.1/32,DIRECT,no-resolve')
+  rules.push('IP-CIDR,::1/128,DIRECT,no-resolve')
+  for (const ip of (SET.directIPs || [])) {
+    const cidr = String(ip).includes('/') ? ip : `${ip}/32`
+    rules.push(`IP-CIDR,${cidr},DIRECT,no-resolve`)
+  }
+  for (const d of FORCED) rules.push(`DOMAIN-SUFFIX,${d},🚀 节点选择`)
+  if (SET.domain && !FORCED.includes(SET.domain)) rules.push(`DOMAIN-SUFFIX,${SET.domain},DIRECT`)
+  for (const d of (SET.directDomains || []).filter(d => !FORCED.includes(d))) rules.push(`DOMAIN-SUFFIX,${d},DIRECT`)
+  for (const p of act) {
+    const name = srName(p.name)
+    policyDomains(p, lib).forEach(d => rules.push(`DOMAIN-SUFFIX,${d},${name}`))
+    ;(p.keywords || []).forEach(k => rules.push(`DOMAIN-KEYWORD,${k},${name}`))
+    // iOS 没有进程名匹配，不写 PROCESS-NAME
+  }
+  rules.push('GEOIP,CN,DIRECT')
+  rules.push(blacklist ? 'FINAL,DIRECT' : 'FINAL,🚀 节点选择')
+
+  return [
+    `# 订阅由 Cloudflare Worker 生成（${blacklist ? '黑名单模式' : '白名单模式'}）`,
+    `# 自有 ${ownNames.length} 节点 / 机场 ${upKept.length} 节点 / ${act.length} 条分流策略`,
+    `[General]`,
+    `bypass-system = true`,
+    `skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local, captive.apple.com`,
+    `tun-excluded-routes = 10.0.0.0/8, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16`,
+    `dns-server = ${dnsServer}`,
+    `fallback-dns-server = system`,
+    `ipv6 = false`,
+    ``,
+    `[Proxy]`,
+    ...ownLines,
+    ...upLines,
+    ``,
+    `[Proxy Group]`,
+    ...groups,
+    ``,
+    `[Rule]`,
+    ...rules
+  ].join('\n')
 }
 
 // ---------- 分享链接（v2rayN / 通用 base64 订阅）----------
@@ -3267,7 +3606,7 @@ function viewNode(){
   h += Object.entries(ow).map(([k,n]) => \`<div class="up own">
       <span class="dot"></span>
       <span class="nm">\${esc(n.name)}</span>
-      <span class="tgt">\${n.type === 'vless' ? 'VLESS Reality' : 'Hysteria2'}</span>
+      <span class="tgt">\${n.type === 'vless' ? (n.net === 'ws' ? 'VLESS WS' : 'VLESS Reality') : 'Hysteria2'}</span>
       <span class="u">\${esc(n.s)}:\${esc(String(n.p))}\${n.ports ? ' · ' + esc(n.ports) : ''}</span>
       <button class="ib" data-tip="编辑" onclick="editOwn('\${esc(k)}')">\${icon('edit')}</button>
       <button class="ib dl" data-tip="删除" onclick="delOwn('\${esc(k)}','\${esc(n.name)}')">\${icon('trash')}</button>
@@ -3441,11 +3780,12 @@ function viewSub(){
     <div class="hint" style="margin:-6px 0 11px">每份订阅一个独立 token，可分别挑选包含哪些节点、机场、地区和策略。给不同设备或不同人用不同订阅，互不影响。</div>
     <div class="tips" style="margin:0 0 15px">
       <span><code>&mode=blacklist</code> 黑名单</span>
+      <span><code>&fmt=shadowrocket</code> Shadowrocket 原生 conf</span>
       <span><code>&fmt=singbox</code> sing-box</span>
       <span><code>&fmt=share</code> v2rayN / base64</span>
       <span><code>&upstream=0</code> 仅自有节点</span>
     </div>
-    <div class="hint" style="margin:-8px 0 13px">Clash Verge · Stash · Shadowrocket · v2rayN 直接用地址即可；sing-box 与只认 base64 节点列表的客户端加对应参数。</div>\`
+    <div class="hint" style="margin:-8px 0 13px">Clash Verge · Stash · v2rayN 直接用地址即可（Clash YAML）。Shadowrocket 同一地址按 UA 下发原生 conf，也可加 &fmt=shadowrocket。sing-box 与只认 base64 节点列表的客户端加对应参数。</div>\`
   h += ps.map((x, i) => \`<div class="pol \${x.enabled===false?'off':''}" style="align-items:flex-start;padding:13px 14px">
       <div style="flex:1;min-width:0">
         <div class="row" style="gap:8px">
@@ -4065,7 +4405,12 @@ window.editOwn = async (key) => {
     } else {
       np.ports = val('oports'); np.obfs = val('oobfs'); np.opwd = val('oopwd')
     }
-    const r = await api('/api/own', { own: { ...ow, [k]: np } })
+    // 保存前重新拉一次自有节点，避免页面 OWN 过期/未加载时
+    // 用空对象合并，把其它节点「覆盖删掉」触发误报悬空引用。
+    const fresh = await api('/api/own')
+    if (!fresh || !fresh.ok) return (fresh && fresh.msg) || '读取自有节点失败，请刷新后再试'
+    const base = (fresh.own && typeof fresh.own === 'object') ? fresh.own : {}
+    const r = await api('/api/own', { own: { ...base, [k]: np } })
     if (!r.ok) return r.msg || '保存失败'      // 服务端的话也留在弹窗里，不关
     OWN = { ok:true, own: r.own }
     return null
@@ -4078,7 +4423,9 @@ window.editOwn = async (key) => {
 
 window.delOwn = async (key, name) => {
   if (!await modal({title:'删除自有节点', desc:\`「\${name}」将从订阅中移除。若有策略指向它，需先改那些策略的分流目标。\`, ok:'删除', danger:true})) return
-  const next = { ...((OWN && OWN.own) || {}) }
+  const fresh = await api('/api/own')
+  if (!fresh || !fresh.ok) return toast((fresh && fresh.msg) || '读取自有节点失败', true)
+  const next = { ...((fresh.own && typeof fresh.own === 'object') ? fresh.own : {}) }
   delete next[key]
   const r = await api('/api/own', { own: next })
   if (!r.ok) return toast(r.msg || '删除失败', true)

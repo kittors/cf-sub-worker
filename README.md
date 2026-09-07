@@ -6,7 +6,7 @@
 
 ```
 自建节点 ─┐
-机场 A  ─┼─→  Cloudflare Worker  ─→  Clash / sing-box / v2rayN
+机场 A  ─┼─→  Cloudflare Worker  ─→  Clash / Shadowrocket / sing-box / v2rayN
 机场 B  ─┘         ↕
               Workers KV
 ```
@@ -18,7 +18,7 @@
 - **节点聚合** — 多家机场订阅 + 自建节点合成一份，节点按地区重命名成 `🇯🇵 日本 01` 这种统一格式，不再是机场原本的 `2x专线-日本-1|勿跑大流量`
 - **分流可配** — AI、流媒体、社交、Apple、Google 等 11 条策略开箱可用，域名库 13 组可增删改，拖拽调整优先级
 - **多订阅** — 每份订阅独立 token，可分别挑选包含哪些节点/地区/策略，甚至给每份订阅配一套完全不同的分流规则
-- **格式通吃** — 进来认 Clash YAML（单行 flow 与块式缩进）、base64 与明文分享链接列表；出去按客户端下发 Clash YAML / sing-box JSON / base64 节点列表
+- **格式通吃** — 进来认 Clash YAML（单行 flow 与块式缩进）、base64 与明文分享链接列表；出去按客户端下发 Clash YAML / Shadowrocket conf / sing-box JSON / base64 节点列表
 - **拉不动也能用** — 机场挡住 Worker 出站时，可以把订阅内容从浏览器复制粘贴进来，走同一套解析并存成快照
 - **可观测** — 机场剩余流量、套餐到期倒数直接显示在管理端，抓取诊断会列出每种客户端身份的试拉结果
 
@@ -59,7 +59,8 @@ bash deploy.sh
 
 | 客户端 | 用法 |
 |--------|------|
-| Clash Verge / Stash / Shadowrocket / v2rayN | 直接用订阅地址 |
+| Clash Verge / Stash / v2rayN | 直接用订阅地址（Clash YAML） |
+| Shadowrocket | 直接用订阅地址（按 UA 下发原生 `.conf`）；也可加 `&fmt=shadowrocket` / `&fmt=sr` |
 | sing-box | 地址后加 `&fmt=singbox`（UA 含 sing-box 时自动识别） |
 | 只认 base64 节点列表的客户端 | 加 `&fmt=share`，此格式不含分流规则 |
 
@@ -110,13 +111,13 @@ bash deploy.sh
 ## 开发
 
 ```bash
-node test/run.cjs     # 355 项断言
+node test/run.cjs     # 669 项断言
 bash deploy.sh        # 部署
 ```
 
 `worker.js` 单文件承载全部逻辑 —— Workers 部署一个 JS 文件最省事，也免去打包步骤。改完先跑测试再部署。
 
-测试覆盖三种输出格式的合法性与引用完整性、三种入站格式的等价性、规则优先级、目标解析回退、机场元信息多格式解析、多订阅裁剪、粘贴导入与失败措辞、以及一组管理端 UI 的静态断言。最后一组是从踩过的坑固化来的。
+测试覆盖 Clash YAML / Shadowrocket conf / sing-box JSON 三种输出格式的合法性与引用完整性、三种入站格式的等价性、规则优先级、目标解析回退、机场元信息多格式解析、多订阅裁剪、粘贴导入与失败措辞、以及一组管理端 UI 的静态断言。最后一组是从踩过的坑固化来的。
 
 ## 踩过的坑
 
