@@ -9,7 +9,8 @@
 # 首次部署会生成一个初始化令牌并注入为 Worker secret，用于设置管理密码。
 #
 # 注意：PUT scripts 接口若 metadata 不带 bindings，会清空 Worker 现有绑定，
-# 所以每次部署都必须把绑定重新声明一遍。
+# 所以每次部署都必须把绑定重新声明一遍。控制台里另加的 secret 也一样，
+# 这里会逐个以 inherit 带上 —— secret 的值读不回来，删了就再也找不回。
 
 set -uo pipefail
 
@@ -61,6 +62,14 @@ except Exception: print(''); sys.exit()
 b = d.get('result', {}).get('bindings', []) if d.get('success') else []
 print('yes' if any(x.get('name') == 'SETUP_TOKEN' for x in b) else '')
 ")
+# 脚本不认识的 secret（控制台里手动加的等）原样沿用
+KEEP_SECRETS=$(api "$API/workers/scripts/$SCRIPT/settings" | python3 -c "
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: sys.exit()
+b = d.get('result', {}).get('bindings', []) if d.get('success') else []
+print(' '.join(x['name'] for x in b if x.get('type') == 'secret_text' and x.get('name') != 'SETUP_TOKEN'))
+")
 if [ -n "$HAS_SETUP" ] && [ -z "${SETUP_TOKEN:-}" ]; then
   KEEP=1
 else
@@ -71,13 +80,15 @@ fi
 # --- 3. 部署 ---
 cp worker.js "/tmp/${SCRIPT}.js"
 
-METADATA=$(KEEP="$KEEP" NS="$NS" BINDING="$BINDING" python3 -c "
+METADATA=$(KEEP="$KEEP" NS="$NS" BINDING="$BINDING" KEEP_SECRETS="$KEEP_SECRETS" python3 -c "
 import json, os
 b = [{'type': 'kv_namespace', 'name': os.environ['BINDING'], 'namespace_id': os.environ['NS']}]
 if os.environ['KEEP'] == '1':
     b.append({'type': 'inherit', 'name': 'SETUP_TOKEN'})
 else:
     b.append({'type': 'secret_text', 'name': 'SETUP_TOKEN', 'text': os.environ.get('SETUP_TOKEN', '')})
+for n in os.environ.get('KEEP_SECRETS', '').split():
+    b.append({'type': 'inherit', 'name': n})
 print(json.dumps({
   'body_part': 'script',
   'compatibility_date': '2025-04-01',
@@ -106,6 +117,9 @@ names = {x.get('name'): x.get('type') for x in b}
 print('   绑定:', ', '.join(f'{k}({v})' for k, v in names.items()) or '(无)')
 if '$BINDING' not in names:
     print('   ❌ KV 绑定缺失，管理端将无法读写配置'); sys.exit(1)
+lost = [n for n in '$KEEP_SECRETS'.split() if n not in names]
+if lost:
+    print('   ❌ 这些 secret 没带过来：', ', '.join(lost)); sys.exit(1)
 "
 
 if [ "$KEEP" = "0" ]; then
