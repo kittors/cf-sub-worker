@@ -3180,12 +3180,15 @@ input.bad:focus,textarea.bad:focus{border-color:var(--warn);box-shadow:0 0 0 3.5
   display:flex;flex-direction:column;overflow:hidden;animation:mdIn .26s var(--e) both}
 .md.lg{max-width:520px}
 /* 头尾 flex-shrink:0 固定，中间 min-height:0 才能真正滚动（flex 子项默认 min-height:auto 会撑破容器） */
-.md .hd{padding:21px 23px 14px;flex-shrink:0;border-bottom:1px solid transparent;transition:border-color .18s var(--e)}
+.md .hd{padding:21px 23px 14px;flex-shrink:0;border-bottom:1px solid transparent;transition:border-color .18s var(--e);position:relative}
+/* 右上角关闭。点遮罩不再关窗（见 modal 里的说明），这里是除「取消」外唯一的显式出口 */
+.md .x{position:absolute;top:19px;right:16px}
+.md .x.hint{background:var(--accBg);color:var(--acc)}
 .md .ct{padding:0 23px;overflow-y:auto;flex:1;min-height:0}
 .md.sc .hd{border-bottom-color:var(--bd2)}
 .md.scb .ft{border-top-color:var(--bd2)}
 .bd.out .md{animation:mdOut .16s var(--e) both}
-.md h3{font-size:15.5px;font-weight:600;letter-spacing:-.01em}
+.md h3{font-size:15.5px;font-weight:600;letter-spacing:-.01em;padding-right:34px}
 .md p{color:var(--tx2);font-size:13.5px;margin-top:7px;line-height:1.6}
 .md .bdy{padding:15px 0;display:flex;flex-direction:column;gap:9px}
 .md .ft{display:flex;gap:8px;justify-content:flex-end;padding:14px 23px 20px;flex-shrink:0;border-top:1px solid transparent;transition:border-color .18s var(--e)}
@@ -3222,6 +3225,7 @@ input.bad:focus,textarea.bad:focus{border-color:var(--warn);box-shadow:0 0 0 3.5
 <g id="i-grip" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="6" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="15" cy="18" r="1.3"/></g>
 <g id="i-undo" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.1-9.4L3 7"/></g>
 <g id="i-fold" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m4 8 8 8 8-8"/></g>
+<g id="i-x" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></g>
 </defs></svg>
 
 <div class="toasts" id="toasts"></div>
@@ -3277,7 +3281,8 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
     const bd = document.createElement('div')
     bd.className = 'bd'
     bd.innerHTML = \`<div class="md \${wide?'lg':''}" role="dialog" aria-modal="true">
-      <div class="hd"><h3>\${esc(title)}</h3>\${desc ? \`<p>\${esc(desc)}</p>\` : ''}</div>
+      <div class="hd"><h3>\${esc(title)}</h3>\${desc ? \`<p>\${esc(desc)}</p>\` : ''}
+        <button type="button" class="ib x" data-close aria-label="关闭">\${icon('x')}</button></div>
       <div class="ct">
         \${html ? \`<div class="bdy">\${html}</div>\` : ''}
         \${fields.length ? \`<div class="bdy">\${fields.map((f,i)=>\`<input data-i="\${i}" placeholder="\${esc(f.ph||'')}" value="\${esc(f.val||'')}">\`).join('')}</div>\` : ''}
@@ -3291,6 +3296,31 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
     setTimeout(() => (inputs[0] || bd.querySelector('[data-ok]')).focus(), 60)
     if (inputs[0]) inputs[0].select()
     if (onMount) onMount(box)
+    // 名单类输入框按内容撑开（封顶约 12 行）：长名单不必在三行高的小框里上下翻，
+    // 也就用不着去拖右下角的缩放手柄。只增不减，手动拖大的尺寸不会被打字打回去。
+    const fit = ta => {
+      if (!ta.offsetParent) return
+      const need = Math.min(ta.scrollHeight + 2, 280)
+      if (need > ta.offsetHeight) ta.style.height = need + 'px'
+    }
+    box.querySelectorAll('.ct textarea').forEach(ta => { fit(ta); ta.addEventListener('input', () => fit(ta)) })
+    // 打开时给表单拍张快照，Esc 时比对：动过的表单不许一键关掉
+    const state = () => JSON.stringify([
+      [...box.querySelectorAll('.ct input, .ct textarea')].map(e => e.type === 'checkbox' ? e.checked : e.value),
+      [...box.querySelectorAll('.ct .sel')].map(e => e.dataset.v),
+      [...box.querySelectorAll('.ct .chip, .ct .sw')].map(e => e.classList.contains('on') || e.dataset.on === '1')
+    ])
+    const pristine = state()
+    const dirty = () => state() !== pristine
+    // 想关却没关成时的反馈：面板弹一下，右上角 × 亮一下，告诉用户出口在哪
+    const xBtn = bd.querySelector('[data-close]')
+    const hint = () => {
+      if (box.animate && !matchMedia('(prefers-reduced-motion: reduce)').matches)
+        box.animate([{ transform:'none' }, { transform:'scale(1.012)' }, { transform:'none' }], { duration:280, easing:'cubic-bezier(.16,1,.3,1)' })
+      xBtn.classList.add('hint')
+      clearTimeout(xBtn._t)
+      xBtn._t = setTimeout(() => xBtn.classList.remove('hint'), 900)
+    }
     // 内容可滚动时才给头尾描边，避免短内容也画两条线
     const ct = box.querySelector('.ct')
     const shade = () => {
@@ -3342,14 +3372,46 @@ function modal({title, desc, html = '', fields = [], ok = '确定', danger = fal
       holder.appendChild(tip)
       tip.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     }
+    // 输入法组字时，Esc 是「撤掉候选词」、Enter 是「上屏」，都不是冲着弹窗来的。
+    // Chrome 此时给 isComposing / keyCode 229；Safari 先发 compositionend 再发 keydown，
+    // 两个标志都已复位，只能自己记着「刚组完字」，同一轮事件里的按键一律放过。
+    let composing = false
+    bd.addEventListener('compositionstart', () => { composing = true })
+    bd.addEventListener('compositionend', () => setTimeout(() => { composing = false }))
     const onKey = e => {
-      if (e.key === 'Escape') { if (bd.querySelector('.sel.open')) return; close(null) }
+      if (bd.classList.contains('out') || composing || e.isComposing || e.keyCode === 229) return
+      // 叠了两层时（Tab 能把焦点挪到遮罩后面的按钮上再回车）只有最上面那层响应
+      if ([...document.querySelectorAll('.bd:not(.out)')].pop() !== bd) return
+      if (e.key === 'Escape') {
+        if (bd.querySelector('.sel.open')) return closeAllSel()   // 先收起展开的下拉
+        if (dirty()) { hint(); return toast('改动还没保存。确定不要了，请点右上角 × 或「取消」', true) }
+        return close(null)
+      }
       if (e.key === 'Enter' && !html && document.body.contains(bd)) submit()
     }
     document.addEventListener('keydown', onKey)
-    bd.querySelector('[data-x]').onclick = () => close(null)
-    bd.querySelector('[data-ok]').onclick = submit
-    bd.onclick = e => { if (e.target === bd) close(null) }
+    xBtn.onclick = () => close(null)
+    // noCancel 的弹窗（如抓取诊断）没有取消按钮，不判空的话这里一抛异常，
+    // 后面「知道了」的绑定就走不到了 —— 按钮点了没反应，弹窗只能按 Esc 关。
+    const cancelBtn = bd.querySelector('[data-x]')
+    if (cancelBtn) cancelBtn.onclick = () => close(null)
+    okBtn.onclick = submit
+    // 点遮罩不关窗。以前是关的，而在输入框里拖选文字、拖 textarea 的缩放手柄时
+    // 只要在弹窗外松手，浏览器就把 click 派给按下点与松开点的公共祖先 —— 正是遮罩，
+    // 一松手弹窗就没了、填的全丢。现在按下和松开都在遮罩上，也只是提示出口在哪。
+    let downOnBd = false
+    bd.addEventListener('pointerdown', e => { downOnBd = e.target === bd })
+    bd.addEventListener('click', e => { if (e.target === bd && downOnBd) hint(); downOnBd = false })
+  })
+}
+
+/* 表单里的开关（带 id 的 .sw）：点一下翻转 data-on，保存时再读。
+   列表行上的开关各自 onclick 直接存盘，不归这里管。
+   DNS 设置那三个开关以前谁都没绑，点了纹丝不动。 */
+function bindSwitch(root){
+  root.querySelectorAll('.sw[id]').forEach(s => {
+    s.type = 'button'
+    s.onclick = () => { s.dataset.on = s.dataset.on === '1' ? '0' : '1' }
   })
 }
 
@@ -3848,6 +3910,8 @@ window.resetProf = async () => {
 }
 
 window.editProf = async (i) => {
+  // 列表没加载到时保存，会拿一份残缺的数组把全部订阅覆盖掉
+  if (!PRF || !PRF.ok || !Array.isArray(PRF.profiles)) return toast('订阅列表还没加载出来，刷新页面后再试', true)
   const isNew = i === null
   const o = PRF.opts || {own:[],ups:[],regions:[],pols:[]}
   const x = isNew
@@ -3878,24 +3942,39 @@ window.editProf = async (i) => {
       const a = new Uint8Array(16); crypto.getRandomValues(a)
       b.querySelector('#stk').value = [...a].map(v => v.toString(16).padStart(2,'0')).join('')
     }
+  }, onSubmit: async b => {
+    const np = {
+      id: x.id || 'f' + Date.now().toString(36),
+      name: b.querySelector('#sn').value.trim(),
+      token: b.querySelector('#stk').value.trim(),
+      enabled: x.enabled !== false,
+      mode: selValue(b.querySelector('#smd')),
+      own: chipsValue(b.querySelector('#so')), ups: chipsValue(b.querySelector('#su')),
+      regions: chipsValue(b.querySelector('#sr')),
+      pols: b.querySelector('#sp') ? chipsValue(b.querySelector('#sp')) : (x.pols || 'all'),
+      policies: Array.isArray(x.policies) ? x.policies : 'inherit',
+      note: b.querySelector('#snt').value.trim()
+    }
+    if (!np.name) return { msg:'请填写订阅名称', field:'sn' }
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(np.token))
+      return { msg:'token 需为 16-64 位字母数字（可含 _ -），点「重新生成」最省事', field:'stk' }
+    // 在副本上改：服务端拒了，页面上的数据也不会被带偏
+    const next = PRF.profiles.slice()
+    if (isNew) next.push(np); else next[i] = np
+    const r = await api('/api/profiles', { profiles: next })
+    if (!r.ok) {
+      const m = r.msg || '保存失败'
+      // 服务端是对全部订阅一起校验的，报的未必是这一条 —— 点名本条时才定位到字段
+      const mine = m.includes('「' + np.name + '」')
+      return { msg: m, field: /token/.test(m) && (mine || /重复/.test(m)) ? 'stk' : mine && /节点/.test(m) ? 'so' : null }
+    }
+    PRF.profiles = r.profiles
+    return null
   }})
   if (!box) return
-
-  const np = {
-    id: x.id || 'f' + Date.now().toString(36),
-    name: box.querySelector('#sn').value.trim(),
-    token: box.querySelector('#stk').value.trim(),
-    enabled: x.enabled !== false,
-    mode: selValue(box.querySelector('#smd')),
-    own: chipsValue(box.querySelector('#so')), ups: chipsValue(box.querySelector('#su')),
-    regions: chipsValue(box.querySelector('#sr')),
-    pols: box.querySelector('#sp') ? chipsValue(box.querySelector('#sp')) : (x.pols || 'all'),
-    policies: Array.isArray(x.policies) ? x.policies : 'inherit',
-    note: box.querySelector('#snt').value.trim()
-  }
-  if (!np.name) return toast('订阅名称不能为空', true)
-  if (isNew) PRF.profiles.push(np); else PRF.profiles[i] = np
-  await saveProf(isNew ? '已新建订阅' : '已保存')
+  toast(isNew ? '已新建订阅' : '已保存')
+  ST = null   // 订阅地址展示依赖首个启用档案
+  dash(true)
 }
 
 /* 地区折叠状态存本地，刷新后保留；节点多时默认收起，避免一屏拉不到底 */
@@ -4207,8 +4286,7 @@ window.editPol = async (i) => {
         <input id="pp" value="\${esc((p.processes||[]).join(', '))}" placeholder="进程名，如 ChatGPT"></div></div>\`
 
   const box = await modal({ title: isNew ? '新建策略' : '编辑策略', html, ok:'保存', wide:true, onMount: b => {
-    bindSelect(b)
-    b.querySelector('#ps').onclick = function(){ this.dataset.on = this.dataset.on === '1' ? '0' : '1' }
+    bindSelect(b); bindSwitch(b)
     b.querySelectorAll('#pc .chip').forEach(c => c.onclick = () => c.classList.toggle('on'))
   }, onSubmit: async b => {
     const name = b.querySelector('#pn').value.trim()
@@ -4260,7 +4338,9 @@ window.editLib = async (key) => {
 }
 
 window.editSettings = async () => {
-  const st = (SET && SET.settings) || { domain:'', directDomains:[], directIPs:[] }
+  // 没加载到就别打开：拿一张空表单点保存，直连名单和强制代理名单会被整份清空
+  if (!SET || !SET.ok || !SET.settings) return toast('站点设置还没加载出来，刷新页面后再试', true)
+  const st = SET.settings
   const html = \`
     <div class="fg"><label class="lb">本站域名</label>
       <input id="stdm" value="\${esc(st.domain)}" placeholder="sub.example.com">
@@ -4281,10 +4361,10 @@ window.editSettings = async () => {
     const bad = lines2('#stip').find(x => !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(x))
     if (bad) return { msg:'「' + bad + '」不是合法的 IPv4 地址', field:'stip' }
     const r = await api('/api/settings', {
-      domain: b.querySelector('#std').value.trim(),
+      domain: b.querySelector('#stdm').value.trim(),
       directDomains: lines2('#stdd'), directIPs: lines2('#stip'), proxyDomains: lines2('#stpx')
     })
-    if (!r.ok) return { msg: r.msg || '保存失败', field: /IP/.test(r.msg || '') ? 'stip' : 'std' }
+    if (!r.ok) return { msg: r.msg || '保存失败', field: /IP/.test(r.msg || '') ? 'stip' : 'stdm' }
     SET = { ok:true, settings: r.settings, dnsGroups: (SET && SET.dnsGroups) || [] }
     return null
   }})
@@ -4478,7 +4558,7 @@ window.editDns = async () => {
       \${ta('dfilter', d.extraFilter, 'example.com')}
       <div class="hint">某些应用要拿到真实 IP 才能工作（如部分游戏、内网服务）。本站域名已自动在列。</div></div>\`
   const box = await modal({ title:'DNS 设置', html, ok:'保存', wide:true,
-    onMount: b => { bindSelect(b); window.__dnsBox = b },
+    onMount: b => { bindSelect(b); bindSwitch(b); window.__dnsBox = b },
     onSubmit: async b => {
       const lines2 = sel => [...b.querySelectorAll(sel)].map(e => e.value).join('\\n')
         .split('\\n').map(x => x.trim()).filter(Boolean)
@@ -4673,7 +4753,9 @@ window.editUp = async (id) => {
     const url = b.querySelector('#uu').value.trim()
     const text = b.querySelector('#ut').value.trim()
     const a = selValue(b.querySelector('#ua')) === '1'
-    if (!url && !text) return { msg:'订阅链接和订阅内容至少要填一个', field:'uu' }
+    // 粘贴导入的源本来就没有链接，只改名字或更新方式时两样都不用填。
+    // 原本有链接却被清空才拦：服务端收到空链接是保持原样，不拦的话用户会以为删掉了
+    if (!url && !text && u.url) return { msg:'订阅链接和订阅内容至少要填一个', field:'uu' }
     if (url && !/^https?:\\/\\//.test(url)) return { msg:'链接要以 http:// 或 https:// 开头', field:'uu' }
     let r = await api('/api/upstreams', { act:'edit', id, name, url, auto:a, text, force: b.__retry ? 1 : 0 })
     if (!r.ok && (r.canPaste || r.canForce) && !b.__retry) {

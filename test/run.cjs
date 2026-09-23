@@ -1832,7 +1832,7 @@ sec('46. 全部表单：错误显示在字段下方，不清空重填')
   const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
 
   // 每个带输入的表单都要走 onSubmit，否则就还是「关窗口 + 角落 toast」的老路
-  const forms = ['editOwn', 'editPol', 'editLib', 'editSettings', 'editDns', 'editChain', 'changePwd', 'addUp', 'editUp']
+  const forms = ['editOwn', 'editPol', 'editLib', 'editSettings', 'editDns', 'editChain', 'changePwd', 'addUp', 'editUp', 'editProf']
   const missing = []
   for (const f of forms) {
     const i = ui.indexOf('window.' + f + ' = async')
@@ -2061,6 +2061,115 @@ sec('50. Shadowrocket 原生 conf')
   const weird = [{ name: '👻 未知', region: 'jp', kv: { type: 'wireguard', server: 'x.example.invalid', port: '443' } }]
   const srSkip = T.genSR(false, weird, [], LIB, {}, SET)
   ok(!/wireguard/.test(srSkip) && !/👻 未知 = /.test(srSkip), '未知协议整节点跳过')
+}
+
+// 管理端脚本按函数切块：弹窗表单的模板和读取逻辑都在同一个 window.xxx 里
+const uiBlocks = () => {
+  const ui = T.adminHTML(true, true)
+  const js = ui.slice(ui.indexOf('<script>'), ui.lastIndexOf('</script>'))
+  const marks = [...js.matchAll(/\n(?:window\.(\w+) = async|async function (\w+)|function (\w+))/g)]
+    .map(m => ({ i: m.index, name: m[1] || m[2] || m[3] }))
+  return marks.map((m, k) => ({ name: m.name, body: js.slice(m.i, k + 1 < marks.length ? marks[k + 1].i : undefined) }))
+    .filter(b => /modal\(\{/.test(b.body))
+}
+
+sec('51. 表单读取的元素必须在模板里存在')
+{
+  // 站点设置的输入框叫 stdm，保存时却去读 #std —— querySelector 拿到 null，
+  // 点保存就是「Cannot read properties of null (reading 'value')」，
+  // 直连域名、直连 IP、强制代理域名一样都存不进去。正则扫不出这种错，只能逐个表单对账。
+  const ui = T.adminHTML(true, true)
+  const dynamic = T.DNS_GROUPS.map(g => 'dg_' + g.k)     // editDns 按分组拼出来的 id
+  const bad = [], checked = []
+  for (const { name, body } of uiBlocks()) {
+    const defined = new Set(dynamic)
+    for (const x of body.matchAll(/id="([\w-]+)"/g)) defined.add(x[1])
+    for (const x of body.matchAll(/(?:selectHTML|chipsHTML|ta)\('([\w-]+)'/g)) defined.add(x[1])
+    const used = new Set()
+    for (const x of body.matchAll(/querySelector(?:All)?\('#([\w-]+)/g)) used.add(x[1])
+    for (const x of body.matchAll(/\b(?:val|put)\('([\w-]+)'/g)) used.add(x[1])
+    // field 指向出错时要高亮的输入框，写错了错误提示就找不到落脚处
+    for (const x of body.matchAll(/field:([^}\n]*)/g))
+      for (const y of x[1].matchAll(/'([\w-]+)'(?!\s*\+)/g)) used.add(y[1])
+    if (used.size) checked.push(name)
+    for (const u of used) if (!defined.has(u)) bad.push(`${name} → #${u}`)
+  }
+  ok(checked.length >= 10, `逐个表单核对了元素 id（${checked.length} 个表单）`)
+  ok(bad.length === 0, '读取的 id 都在模板里' + (bad.length ? '：' + bad.join('，') : ''))
+  ok(/domain: b\.querySelector\('#stdm'\)/.test(ui), '站点设置读的是 #stdm')
+  // 没加载到就打开的话，拿空表单一保存，白名单、黑名单会被整份清空
+  ok(/站点设置还没加载出来/.test(ui), '站点设置没加载到时不打开')
+}
+
+sec('52. 弹窗不会被误触关掉')
+{
+  // 以前点遮罩就关。更要命的是在输入框里拖选文字、拖 textarea 的缩放手柄时，
+  // 只要在弹窗外松手，click 就派给按下点和松开点的公共祖先 —— 遮罩本身，
+  // 弹窗应声而关、填的全丢。中文输入法按 Esc 撤候选词，也会把弹窗一起关掉。
+  const ui = T.adminHTML(true, true)
+  const m = ui.slice(ui.indexOf('function modal('), ui.indexOf('function bindSwitch'))
+  ok(m.length > 500, '找到 modal 实现')
+  ok(!/e\.target === bd\) close\(/.test(m) && !/bd\.onclick/.test(m), '点遮罩不再关窗')
+  ok(/pointerdown/.test(m) && /downOnBd/.test(m), '按下也在遮罩上才算点遮罩，拖选出界不算')
+  ok(/data-close/.test(m) && /icon\('x'\)/.test(m) && /<g id="i-x"/.test(ui), '右上角有关闭按钮')
+  ok(/\.md \.x\{position:absolute/.test(ui), '关闭按钮定位在右上角')
+  ok(/xBtn\.onclick = \(\) => close\(null\)/.test(m), '关闭按钮直接关，不做拦截')
+  ok(/e\.isComposing/.test(m) && /keyCode === 229/.test(m) && /compositionend/.test(m), 'Esc / Enter 放过输入法组字')
+  ok(/const pristine = state\(\)/.test(m) && /if \(dirty\(\)\)/.test(m), '改过的表单 Esc 不一键关掉')
+  ok(/\.sel\.open'\)\) return closeAllSel\(\)/.test(m), '下拉展开时 Esc 只收起下拉')
+  ok(/\.pop\(\) !== bd\) return/.test(m), '叠了两层时只有最上层响应 Esc')
+  // noCancel 的弹窗没有取消按钮，绑定前不判空就抛异常，「知道了」跟着失灵
+  ok(/const cancelBtn = bd\.querySelector\('\[data-x\]'\)\s*if \(cancelBtn\)/.test(m), '没有取消按钮的弹窗不再抛异常')
+  ok(!/bd\.querySelector\('\[data-x\]'\)\.onclick/.test(m), '不再对可能为空的取消按钮直接赋值')
+  ok(/const fit = ta =>/.test(m), '名单输入框随内容撑高，不必去拖缩放手柄')
+}
+
+sec('53. 表单里的开关都能点')
+{
+  // DNS 设置里「境外 DNS 走代理」「fake-ip」「IPv6」三个开关以前谁都没绑点击，点了纹丝不动
+  const ui = T.adminHTML(true, true)
+  ok(/function bindSwitch\(root\)/.test(ui), '有统一的开关绑定')
+  const unbound = []
+  for (const { name, body } of uiBlocks()) {
+    // 表单开关：带 id、没有自己的 onclick（列表行上的开关各自 onclick 直接存盘）
+    const sws = [...body.matchAll(/<button class="sw" id="([\w-]+)"(?![^>]*onclick)/g)].map(x => x[1])
+    if (sws.length && !/bindSwitch\(b\)/.test(body)) unbound.push(name + ': ' + sws.join(','))
+  }
+  ok(unbound.length === 0, '每个带开关的表单都绑了点击' + (unbound.length ? '：' + unbound.join('；') : ''))
+  ok(/window\.editDns = async[\s\S]*?bindSwitch\(b\)[\s\S]*?\nwindow\.addDnsPol/.test(ui), 'DNS 设置绑了开关')
+}
+
+sec('54. 订阅编辑：出错留在弹窗里')
+{
+  // 订阅编辑（含白名单 / 黑名单模式）是唯一还没改走 onSubmit 的表单：
+  // 服务端一拒，弹窗已经关了，改的模式、勾的节点全丢
+  const ui = T.adminHTML(true, true)
+  const i = ui.indexOf('window.editProf = async')
+  const body = ui.slice(i, ui.indexOf('\nwindow.', i + 10))
+  ok(/onSubmit: async b =>/.test(body), '走 onSubmit')
+  ok(/field:'sn'/.test(body) && /field:'stk'/.test(body), '名称与 token 就地校验并定位字段')
+  ok(/PRF\.profiles\.slice\(\)/.test(body), '在副本上改，被拒时页面数据不跑偏')
+  ok(!/saveProf\(/.test(body), '不再关窗后才保存')
+  ok(/订阅列表还没加载出来/.test(body), '列表没加载到时不打开，免得残缺数组覆盖全部订阅')
+}
+
+sec('55. 粘贴导入的订阅源可以只改名字')
+{
+  // 这类源本来就没有链接，以前改个名字也被「链接和内容至少填一个」拦住
+  const ui = T.adminHTML(true, true)
+  ok(/if \(!url && !text && u\.url\) return/.test(ui), '只有原本有链接却被清空时才拦')
+  // 前端放行之后，服务端也得真的接得住：不带链接和内容的 edit 只改名字
+  const exp = String(Date.now() + 3600e3)
+  const cookie = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const saved = KV['upstreams']
+  KV['upstreams'] = JSON.stringify([{ id: 'pp1', name: '粘贴源', url: '', enabled: true, auto: false }])
+  const req = new Request('https://x/api/upstreams', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ act: 'edit', id: 'pp1', name: '改过的名字', url: '', auto: false, text: '' }),
+  })
+  const r = await (await T.apiRoute(req, new URL('https://x/api/upstreams'), null)).json()
+  ok(r.ok && r.up && r.up.name === '改过的名字' && r.up.url === '', '服务端接受只改名字，链接保持为空')
+  if (saved === undefined) delete KV['upstreams']; else KV['upstreams'] = saved
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

@@ -111,7 +111,7 @@ bash deploy.sh
 ## 开发
 
 ```bash
-node test/run.cjs     # 669 项断言
+node test/run.cjs     # 704 项断言
 bash deploy.sh        # 部署
 ```
 
@@ -136,6 +136,8 @@ bash deploy.sh        # 部署
 **免费版 Workers 单次请求只有 10ms CPU。** 完整 Clash 配置里 `rules` 能占九成行数，既没节点也没公告，扫它就是白烧预算。解析扫到 `rules:` 就停。
 
 **弹窗退场动画不能复用入场的 animation-name。** 同名时浏览器不重启动画，`animationend` 永不触发，遮罩会一直留着把页面点击全吞掉。
+
+**弹窗不能靠点遮罩关。** 在输入框里拖选文字、拖 textarea 的缩放手柄，只要在弹窗外松手，浏览器就把 click 派给按下点与松开点的公共祖先 —— 恰好是遮罩，一松手弹窗就没了、填的全丢。中文输入法按 Esc 撤候选词也会连带关窗，而 Safari 先发 `compositionend` 再发 `keydown`，光看 `isComposing` 拦不住。现在关窗只走右上角 × 和「取消」，改过的表单按 Esc 也不关。
 
 **多行对齐要用 subgrid。** 每行各自 `display:grid` 时列宽只在行内计算，行与行不共享，内容一变就错位。
 
