@@ -4805,10 +4805,12 @@ function selLabel(opts, picked, multi){
   if (names.length === 1) return names[0] + '（已选 1 项）'
   return names.length === 2 ? names.join('、') : \`\${names[0]} 等 \${names.length} 项\`
 }
-// 读取当前值：单选得字符串，多选得数组
+// 读取当前值：单选得字符串，多选得数组。
+// 多选勾完不收起，面板此时被 openSel 挪到了 body 上；只在 sel 里找会漏掉勾选项，
+// 没收起就点保存会把目标存成空数组。所以从面板本身找，展开、收起都一样
 function selValue(sel){
   if (!sel.classList.contains('multi')) return sel.dataset.v
-  return [...sel.querySelectorAll('.selo.on')].map(o => o.dataset.v)
+  return [...(sel._pop || sel).querySelectorAll('.selo.on')].map(o => o.dataset.v)
 }
 function bindSelect(root){
   root.querySelectorAll('.sel').forEach(sel => {

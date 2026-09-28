@@ -682,6 +682,8 @@ sec('19. 分流目标多选')
   ok(/multi\s*\?\s*picked\.join/.test(ui) || ui.includes("multi ? picked.join('|')"), '多选值序列化')
   ok(ui.includes('return          // 多选时保持展开'), '多选时面板不自动收起')
   ok(ui.includes("if (!pop.querySelector('.selo.on')) o.classList.add('on')"), '至少保留一个选中项')
+  // 展开的面板挂在 body 上，取值若只在 sel 里找，没收起就保存会存成空数组
+  ok(ui.includes("[...(sel._pop || sel).querySelectorAll('.selo.on')]"), '多选取值不受面板挪到 body 影响')
   ok(ui.includes('class="tgts"'), '策略行支持展示多个目标')
   // 浏览器会另外渲染跟随鼠标的元素快照，原行若留着淡内容就成重影。
   // 正确做法是原行退成虚线落点槽：内容 opacity:0（保留行高），边框虚线。

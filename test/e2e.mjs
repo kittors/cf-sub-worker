@@ -179,6 +179,17 @@ try {
     await runMatch('192.0.2.77'); const ip = document.getElementById('mres').textContent
     return { '命中新策略': /E2E/.test(a), 'YouTube 走日本': /YouTube/.test(y) && /日本/.test(y), 'IP 落到兜底并说明': /兜底/.test(ip) && /IP/.test(ip) }`)
   await step('删除新策略', `const i = POL.policies.findIndex(p => p.name === '🧪 E2E'); delPol(i); await __until(__top); await __ok(); await __until(() => document.querySelectorAll('#pollist .pol').length === 12); return true`)
+  // 多选勾完不收起，面板挂在 body 上。这时直接点保存，勾选不能丢（曾经存成空数组）
+  await step('多选目标：面板没收起就点保存，勾选照样落库', `const before = JSON.parse(JSON.stringify(POL.policies[0].target))
+    editPol(0); await __until(__top); const m = __top()
+    m.querySelector('#pt .selb').click(); await __w(50)
+    const o = [...document.querySelectorAll('.selp.portal .selo')].find(x => !x.classList.contains('on'))
+    const v = o.dataset.v; o.click(); await __w(50)
+    const open = !!document.querySelector('.selp.portal:not([hidden])')
+    await __ok(); await __until(() => !__top())
+    const t = POL.policies[0].target
+    POL.policies[0].target = before; await savePol('已恢复')
+    return { '点保存时面板仍展开': open, '新勾的目标已保存': Array.isArray(t) && t.includes(v) }`)
   await step('切到某份订阅并改为专属、再改回继承', `document.querySelector('#pfsel .selb').click(); await __w(50); document.querySelector('.selp.portal .selo[data-v="phone"]').click()
     await __until(() => PF === 'phone' && POL && document.querySelector('#pollist'))
     detachPol(); await __until(__top); await __ok(); await __until(() => POL && POL.inherit === false)
