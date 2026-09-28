@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 安装测试依赖
+        run: npm install --prefix test --no-audit --no-fund
+      - name: 单元与接口测试
+        run: node test/run.cjs
+      # ubuntu-latest 自带 Google Chrome
+      - name: 端到端测试
+        run: node test/e2e.mjs
+      - name: 演示页与源码同步
+        run: |
+          node scripts/build-demo.mjs
+          git diff --stat --exit-code docs/demo.html || (echo "docs/demo.html 过期了：改完 worker.js 请运行 node scripts/build-demo.mjs" && exit 1)
